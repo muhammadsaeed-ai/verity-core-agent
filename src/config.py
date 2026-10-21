@@ -63,6 +63,9 @@ class Settings:
         api_port = int(os.getenv("VERITY_API_PORT", "8000"))
         if not 1 <= api_port <= 65535:
             raise ValueError("VERITY_API_PORT must be between 1 and 65535.")
+        api_key = os.getenv("VERITY_API_KEY", "").strip()
+        if api_key and len(api_key) < 32:
+            raise ValueError("VERITY_API_KEY must contain at least 32 characters.")
         return cls(
             provider=provider,
             gemini_model=os.getenv("VERITY_GEMINI_MODEL", "gemini-2.5-flash").strip(),
@@ -78,7 +81,7 @@ class Settings:
             database_path=Path(os.getenv("VERITY_DATABASE_PATH", "data/verity.sqlite3")),
             output_dir=Path(os.getenv("VERITY_OUTPUT_DIR", "outputs")),
             n8n_webhook_url=os.getenv("N8N_WEBHOOK_URL", "").strip(),
-            api_key=os.getenv("VERITY_API_KEY", "").strip(),
+            api_key=api_key,
             api_host=os.getenv("VERITY_API_HOST", "0.0.0.0").strip(),
             api_port=api_port,
         )
