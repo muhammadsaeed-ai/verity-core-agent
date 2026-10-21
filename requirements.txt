@@ -1,5 +1,5 @@
 # Python 3.12 is the repository CI baseline.
-pydantic==2.14.0
+pydantic==2.12.5
 fastapi==0.121.3
 uvicorn==0.38.0
 httpx==0.28.1
