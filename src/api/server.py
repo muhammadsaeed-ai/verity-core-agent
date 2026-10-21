@@ -22,6 +22,7 @@ from fastapi.security import APIKeyHeader
 from src.config import Settings
 from src.graph.workflow import WorkflowRuntime, build_workflow, initial_state
 from src.api.observability import TaskEventStore
+from src.api.integrity import verify_artifact_records
 from src.schemas import TaskRunRequest
 
 logger = logging.getLogger(__name__)
@@ -393,6 +394,27 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         items = events.list_events(task_id, limit=limit, after_id=after_id)
         return {"task_id": task_id, "items": items, "limit": limit, "after_id": after_id,
                 "next_after_id": items[-1]["event_id"] if items else after_id}
+
+    @app.get("/api/v1/agent/status/{task_id}/artifacts/verify")
+    def verify_agent_artifacts(task_id: str, _auth: None = Depends(require_api_key)) -> dict[str, Any]:
+        if not task_id or len(task_id) > 80 or any(not (ch.isalnum() or ch in "_-") for ch in task_id):
+            raise HTTPException(status_code=422, detail="Invalid task_id.")
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Task was not found.")
+        selected = dict(record.get("state", {}))
+        try:
+            snapshot = runtime.get_state({"configurable": {"thread_id": task_id}})
+            values = getattr(snapshot, "values", {}) or {}
+            if isinstance(values, dict):
+                selected.update(values)
+        except Exception:
+            logger.warning("Checkpoint lookup failed during artifact verification for %s.", task_id)
+        result = verify_artifact_records(
+            chosen.output_dir, task_id, selected.get("execution_artifacts", [])
+        )
+        result["task_status"] = record.get("status", selected.get("status", "unknown"))
+        return result
 
     @app.get("/api/v1/agent/status/{task_id}")
     def get_agent_status(task_id: str, _auth: None = Depends(require_api_key)) -> dict[str, Any]:
