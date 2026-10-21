@@ -9,14 +9,16 @@ import logging
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.security import APIKeyHeader
 
 from src.config import Settings
@@ -28,6 +30,10 @@ from src.schemas import TaskRunRequest
 logger = logging.getLogger(__name__)
 
 
+class TaskQueueFullError(RuntimeError):
+    """Raised when the durable queue reaches its configured admission limit."""
+
+
 class TaskStore:
     def __init__(self, database_path: Path):
         self.database_path = database_path
@@ -35,21 +41,55 @@ class TaskStore:
         with sqlite3.connect(str(database_path), timeout=30) as connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verity_tasks (task_id TEXT PRIMARY KEY, objective TEXT NOT NULL, "
-                "status TEXT NOT NULL, state_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                "status TEXT NOT NULL, state_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                "lease_owner TEXT, lease_until TEXT, attempts INTEGER NOT NULL DEFAULT 0)"
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(verity_tasks)")}
+            if "lease_owner" not in columns:
+                connection.execute("ALTER TABLE verity_tasks ADD COLUMN lease_owner TEXT")
+            if "lease_until" not in columns:
+                connection.execute("ALTER TABLE verity_tasks ADD COLUMN lease_until TEXT")
+            if "attempts" not in columns:
+                connection.execute("ALTER TABLE verity_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verity_idempotency_keys ("
                 "idempotency_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE, "
                 "created_at TEXT NOT NULL)"
             )
 
-    def create(self, task_id: str, objective: str, state: dict[str, Any]) -> None:
+    @staticmethod
+    def _pending_count(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM verity_tasks WHERE status IN ('queued', 'running')"
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+    def count_pending(self) -> int:
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            return self._pending_count(connection)
+
+    def create(
+        self,
+        task_id: str,
+        objective: str,
+        state: dict[str, Any],
+        max_pending: int = 100,
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
-            connection.execute(
-                "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
-                (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if self._pending_count(connection) >= max_pending:
+                    raise TaskQueueFullError("The durable task queue is full; retry after queued work drains.")
+                connection.execute(
+                    "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at, "
+                    "lease_owner, lease_until, attempts) VALUES(?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
+                    (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     @staticmethod
     def request_fingerprint(objective: str) -> str:
@@ -67,7 +107,8 @@ class TaskStore:
         return {"request_hash": row[0], "task_id": row[1]}
 
     def create_idempotent(
-        self, task_id: str, objective: str, state: dict[str, Any], idempotency_key: str
+        self, task_id: str, objective: str, state: dict[str, Any], idempotency_key: str,
+        max_pending: int = 100,
     ) -> tuple[str, str]:
         """Atomically create a task and bind its idempotency key.
 
@@ -88,9 +129,11 @@ class TaskStore:
                     if existing[0] != request_hash:
                         return "conflict", existing[1]
                     return "replay", existing[1]
+                if self._pending_count(connection) >= max_pending:
+                    raise TaskQueueFullError("The durable task queue is full; retry after queued work drains.")
                 connection.execute(
-                    "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at, "
+                    "lease_owner, lease_until, attempts) VALUES(?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
                     (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
                 )
                 connection.execute(
@@ -106,15 +149,81 @@ class TaskStore:
 
     def update(self, task_id: str, status: str, state: dict[str, Any]) -> None:
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
-            connection.execute(
-                "UPDATE verity_tasks SET status=?, state_json=?, updated_at=? WHERE task_id=?",
-                (status, json.dumps(state, ensure_ascii=False), datetime.now(timezone.utc).isoformat(), task_id),
+            now = datetime.now(timezone.utc).isoformat()
+            if status in {"completed", "needs_review", "failed"}:
+                connection.execute(
+                    "UPDATE verity_tasks SET status=?, state_json=?, updated_at=?, lease_owner=NULL, lease_until=NULL "
+                    "WHERE task_id=?",
+                    (status, json.dumps(state, ensure_ascii=False), now, task_id),
+                )
+            elif status == "queued":
+                connection.execute(
+                    "UPDATE verity_tasks SET status=?, state_json=?, updated_at=?, lease_owner=NULL, lease_until=NULL "
+                    "WHERE task_id=?",
+                    (status, json.dumps(state, ensure_ascii=False), now, task_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE verity_tasks SET status=?, state_json=?, updated_at=? WHERE task_id=?",
+                    (status, json.dumps(state, ensure_ascii=False), now, task_id),
+                )
+
+    def claim_next(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
+        """Atomically claim one queued or stale running task, recovering after process death."""
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT task_id, objective, state_json, attempts, status, lease_until FROM verity_tasks "
+                    "WHERE status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)) "
+                    "ORDER BY created_at, task_id LIMIT 1",
+                    (now,),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                task_id = row[0]
+                updated = connection.execute(
+                    "UPDATE verity_tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, updated_at=? "
+                    "WHERE task_id=? AND (status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)))",
+                    (worker_id, lease_until, now, task_id, now),
+                )
+                if updated.rowcount != 1:
+                    connection.rollback()
+                    return None
+                connection.commit()
+                return {
+                    "task_id": task_id,
+                    "objective": row[1],
+                    "state": json.loads(row[2]),
+                    "attempts": int(row[3] or 0) + 1,
+                    "previous_status": row[4],
+                    "previous_lease_until": row[5],
+                    "lease_owner": worker_id,
+                    "lease_until": lease_until,
+                }
+            except Exception:
+                connection.rollback()
+                raise
+
+    def heartbeat(self, task_id: str, worker_id: str, lease_seconds: int) -> bool:
+        now_dt = datetime.now(timezone.utc)
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            cursor = connection.execute(
+                "UPDATE verity_tasks SET lease_until=?, updated_at=? "
+                "WHERE task_id=? AND status='running' AND lease_owner=?",
+                ((now_dt + timedelta(seconds=lease_seconds)).isoformat(), now_dt.isoformat(), task_id, worker_id),
             )
+            return cursor.rowcount == 1
 
     def get(self, task_id: str) -> dict[str, Any] | None:
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
             row = connection.execute(
-                "SELECT task_id, objective, status, state_json, created_at, updated_at FROM verity_tasks WHERE task_id=?",
+                "SELECT task_id, objective, status, state_json, created_at, updated_at, attempts, lease_owner, lease_until "
+                "FROM verity_tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
         if row is None:
@@ -122,6 +231,8 @@ class TaskStore:
         return {
             "task_id": row[0], "objective": row[1], "status": row[2],
             "state": json.loads(row[3]), "created_at": row[4], "updated_at": row[5],
+            "attempts": int(row[6] or 0), "lease_owner": row[7], "lease_until": row[8],
+        }
         }
 
 
