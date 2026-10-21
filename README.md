@@ -192,7 +192,7 @@ For Playwright, install the browser binary once:
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}/artifacts/verify</code> | Verify generated artifact SHA-256 checksums and sizes |
 | <code>GET</code> | <code>/health</code> | Service liveness check |
 
-The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header.
+The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Worker concurrency is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per process). The durable admission queue holds up to 25 times that value across queued and running records; excess requests receive <code>429</code> with a <code>Retry-After</code> header.
 
 For retry-safe client submissions, send a stable <code>Idempotency-Key</code> header (8–128 letters, digits, dots, underscores, colons, or hyphens). A repeated key with the same objective returns the original task without queueing a second execution. Reusing the key with a different objective returns <code>409</code>. Keys and task creation are recorded atomically in SQLite to handle concurrent retries. Example:
 
@@ -204,7 +204,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/agent/run \
   -d '{"objective":"Produce an auditable report for this invoice workflow."}'
 ```
 
-Idempotency prevents duplicate accepted submissions; it does not turn FastAPI background tasks into a durable queue. A process restart can still interrupt work accepted just before it starts.
+### Durable execution and restart recovery
+
+Accepted tasks are stored in SQLite before the API returns. Worker threads claim records atomically under a database transaction, mark each claim with an owner and expiring lease, and heartbeat the lease while a task is executing. On application startup, workers scan the same database and reclaim queued tasks or running tasks whose lease expired after a crash. A recovery increments the attempt count and appends a `task.recovered` event. Completed/failed terminal states release their lease. Existing database files are migrated in place to add the lease and attempt fields.
+
+This is a durable, **at-least-once** execution queue for a single host/local SQLite volume—not exactly-once execution and not a distributed queue service. A crash after a task has caused an external side effect but before its terminal status is committed can cause that task to run again once its lease expires. Any workflow that sends messages, writes to third-party APIs, or charges money must therefore use idempotency keys or side-effect reconciliation at the integration boundary. For multi-host high availability, use an external queue and a shared state store with explicit delivery semantics instead of putting SQLite on a network filesystem. The queue depth is bounded to prevent unbounded storage growth; queued work remains visible through the status and task-inventory endpoints.
+
 
 Verify generated artifacts without downloading their contents:
 
@@ -236,7 +241,7 @@ Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callbac
 | <code>VERITY_API_KEY</code> | empty (protected API disabled) | Required secret for all task endpoints; send as <code>X-API-Key</code> |
 | <code>VERITY_API_HOST</code> | <code>0.0.0.0</code> | API bind host |
 | <code>VERITY_API_PORT</code> | <code>8000</code> | API port |
-| <code>VERITY_MAX_ACTIVE_TASKS</code> | <code>4</code> | Per-process cap for queued/running requests; excess requests receive <code>429</code> |
+| <code>VERITY_MAX_ACTIVE_TASKS</code> | <code>4</code> | Concurrent worker count; durable queue limit is 25× this value and excess requests receive <code>429</code> |
 
 ## Verification
 
