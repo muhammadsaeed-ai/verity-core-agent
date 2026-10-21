@@ -1,0 +1,21 @@
+# Never bake local credentials into an image or build cache.
+.env
+.env.*
+!.env.example
+
+# Git metadata and local development environments.
+.git
+.venv/
+venv/
+.venv-browser-use/
+__pycache__/
+.pytest_cache/
+.coverage
+
+# Local databases and generated run artifacts.
+data/
+data-ci/
+outputs/*
+!outputs/.gitkeep
+outputs-ci/
+*.sqlite3
