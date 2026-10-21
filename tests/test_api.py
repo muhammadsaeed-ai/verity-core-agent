@@ -219,3 +219,49 @@ def test_terminal_checkpoint_wins_when_task_row_write_is_stale(tmp_path, monkeyp
     status = client.get("/api/v1/agent/status/stale-status-01", headers=headers)
     assert status.status_code == 200
     assert status.json()["status"] == "completed"
+
+
+def test_idempotency_key_returns_original_task_for_same_objective(tmp_path):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-idempotency.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789",
+    )
+    client = TestClient(create_app(settings=settings, workflow=build_workflow(settings)))
+    headers = {"X-API-Key": settings.api_key, "Idempotency-Key": "idempotency-test-01"}
+    payload = {
+        "task_id": "idempotency-task-01",
+        "objective": "Verify repeated identical submissions reuse the original task.",
+    }
+    first = client.post("/api/v1/agent/run", json=payload, headers=headers)
+    replay = client.post("/api/v1/agent/run", json=payload, headers=headers)
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["task_id"] == first.json()["task_id"]
+    assert replay.json()["idempotent_replay"] is True
+    inventory = client.get("/api/v1/agent/tasks", headers={"X-API-Key": settings.api_key})
+    assert inventory.status_code == 200
+    assert [item["task_id"] for item in inventory.json()["items"]] == ["idempotency-task-01"]
+
+
+def test_idempotency_key_rejects_a_different_objective(tmp_path):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-idempotency-conflict.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789",
+    )
+    client = TestClient(create_app(settings=settings, workflow=build_workflow(settings)))
+    headers = {"X-API-Key": settings.api_key, "Idempotency-Key": "idempotency-test-02"}
+    first = client.post(
+        "/api/v1/agent/run",
+        json={"task_id": "idempotency-conflict-01", "objective": "Create the original task for this key."},
+        headers=headers,
+    )
+    conflict = client.post(
+        "/api/v1/agent/run",
+        json={"task_id": "idempotency-conflict-02", "objective": "This objective differs from the first."},
+        headers=headers,
+    )
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert client.get("/api/v1/agent/tasks", headers={"X-API-Key": settings.api_key}).json()["count"] == 1
