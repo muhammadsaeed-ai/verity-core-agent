@@ -406,7 +406,10 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         _auth: None = Depends(require_api_key),
     ) -> dict[str, Any]:
         items = events.list_tasks(limit=limit, offset=offset, status=status)
-        return {"items": items, "limit": limit, "offset": offset, "count": len(items), "status_filter": status}
+        return {
+            "items": items, "limit": limit, "offset": offset, "count": len(items),
+            "total_count": events.count_tasks(status=status), "status_filter": status,
+        }
 
     @app.get("/api/v1/agent/status/{task_id}/events")
     def get_agent_events(
