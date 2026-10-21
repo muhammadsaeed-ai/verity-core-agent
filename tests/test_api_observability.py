@@ -35,6 +35,8 @@ def test_task_inventory_and_audit_endpoints_are_authenticated_and_operational(tm
     inventory = client.get("/api/v1/agent/tasks?limit=10&status=completed", headers=headers)
     assert inventory.status_code == 200
     assert any(item["task_id"] == "audit-api-task-01" for item in inventory.json()["items"])
+    assert inventory.json()["count"] == 1
+    assert inventory.json()["total_count"] == 1
 
     events = client.get("/api/v1/agent/status/audit-api-task-01/events?limit=100", headers=headers)
     assert events.status_code == 200
