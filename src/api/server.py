@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import sqlite3
@@ -12,7 +13,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from src.config import Settings
 from src.graph.workflow import WorkflowRuntime, build_workflow, initial_state
@@ -91,6 +92,22 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     app.state.verity_workflow = runtime
     app.state.verity_store = store
 
+    def require_api_key(http_request: Request) -> None:
+        """Fail closed: task APIs remain disabled until an operator configures a secret."""
+        expected = chosen.api_key
+        if not expected:
+            raise HTTPException(
+                status_code=503,
+                detail="Protected API endpoints are disabled. Configure VERITY_API_KEY before use.",
+            )
+        supplied = http_request.headers.get("X-API-Key", "")
+        if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+            raise HTTPException(
+                status_code=401,
+                detail="Missing or invalid API key.",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+
     def run_task(task_id: str, objective: str) -> None:
         state = initial_state(task_id, objective)
         store.update(task_id, "running", state)
@@ -119,7 +136,10 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         return {"status": "ok", "service": "verity-1-agent-api", "version": "1.0.0"}
 
     @app.post("/api/v1/agent/run", status_code=202)
-    def run_agent(request: TaskRunRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    def run_agent(
+        request: TaskRunRequest, background_tasks: BackgroundTasks, http_request: Request
+    ) -> dict[str, Any]:
+        require_api_key(http_request)
         state = initial_state(request.task_id, request.user_objective)
         try:
             store.create(request.task_id, request.user_objective, state)
@@ -133,7 +153,8 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         }
 
     @app.get("/api/v1/agent/status/{task_id}")
-    def get_agent_status(task_id: str) -> dict[str, Any]:
+    def get_agent_status(task_id: str, http_request: Request) -> dict[str, Any]:
+        require_api_key(http_request)
         if not task_id or len(task_id) > 80 or any(not (ch.isalnum() or ch in "_-") for ch in task_id):
             raise HTTPException(status_code=422, detail="Invalid task_id.")
         record = store.get(task_id)
