@@ -8,7 +8,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip && pip install -r requirements.txt
 COPY . .
-RUN mkdir -p /app/data /app/outputs
+RUN groupadd --system --gid 10001 verity \
+    && useradd --system --uid 10001 --gid verity --home-dir /app --no-create-home verity \
+    && mkdir -p /app/data /app/outputs \
+    && chown -R verity:verity /app/data /app/outputs
+
+USER 10001:10001
 
 EXPOSE 8000
 CMD ["python", "main.py", "--serve"]
