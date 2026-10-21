@@ -337,6 +337,8 @@ def test_expired_running_lease_can_be_reclaimed_after_restart(tmp_path):
     original_claim = store.claim_next("old-worker", 300)
     assert original_claim is not None
     assert original_claim["attempts"] == 1
+    assert store.claim_next("other-live-worker", 300) is None
+    assert store.heartbeat(task_id, "old-worker", 300) is True
 
     # Simulate an unclean process death without waiting for a real lease timeout.
     with sqlite3.connect(str(settings.database_path)) as connection:
