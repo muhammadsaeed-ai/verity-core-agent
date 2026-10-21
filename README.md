@@ -185,13 +185,25 @@ For Playwright, install the browser binary once:
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| <code>POST</code> | <code>/api/v1/agent/run</code> | Accept a task and return its ID |
+| <code>POST</code> | <code>/api/v1/agent/run</code> | Accept a task; optional <code>Idempotency-Key</code> prevents duplicate submissions |
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}</code> | Read task status, QA feedback and artifacts |
 | <code>GET</code> | <code>/api/v1/agent/tasks</code> | Filtered, paginated task inventory |
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}/events</code> | Ordered audit timeline with incremental cursor |
 | <code>GET</code> | <code>/health</code> | Service liveness check |
 
 The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header.
+
+For retry-safe client submissions, send a stable <code>Idempotency-Key</code> header (8–128 letters, digits, dots, underscores, colons, or hyphens). A repeated key with the same objective returns the original task without queueing a second execution. Reusing the key with a different objective returns <code>409</code>. Keys and task creation are recorded atomically in SQLite to handle concurrent retries. Example:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/agent/run \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_VERITY_API_KEY" \
+  -H "Idempotency-Key: invoice-audit-2026-001" \
+  -d '{"objective":"Produce an auditable report for this invoice workflow."}'
+```
+
+Idempotency prevents duplicate accepted submissions; it does not turn FastAPI background tasks into a durable queue. A process restart can still interrupt work accepted just before it starts.
 
 Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callback URLs are operator configuration, not accepted from public run requests.
 
