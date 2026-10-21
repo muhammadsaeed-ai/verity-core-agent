@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -88,3 +89,104 @@ def test_openapi_documents_api_key_security_scheme(tmp_path) -> None:
     spec = client.get("/openapi.json").json()
     assert spec["components"]["securitySchemes"]["Verity API Key"]["name"] == "X-API-Key"
     assert spec["paths"]["/api/v1/agent/run"]["post"]["security"] == [{"Verity API Key": []}]
+
+
+
+def test_malformed_webhook_url_does_not_change_success(tmp_path):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-webhook.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789", n8n_webhook_url="http://example.com:invalid/path",
+    )
+    client = TestClient(create_app(settings=settings, workflow=build_workflow(settings)))
+    headers = {"X-API-Key": settings.api_key}
+    response = client.post(
+        "/api/v1/agent/run",
+        json={"task_id": "webhook-safe-01", "objective": "Verify callback parsing cannot corrupt workflow status."},
+        headers=headers,
+    )
+    assert response.status_code == 202
+    status = client.get("/api/v1/agent/status/webhook-safe-01", headers=headers)
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
+
+
+def test_audit_store_failure_does_not_break_task(tmp_path, monkeypatch):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-audit-outage.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789",
+    )
+    app = create_app(settings=settings, workflow=build_workflow(settings))
+
+    def broken_append(*args, **kwargs):
+        raise OSError("simulated event store problem")
+
+    monkeypatch.setattr(app.state.verity_events, "append", broken_append)
+    client = TestClient(app)
+    headers = {"X-API-Key": settings.api_key}
+    response = client.post(
+        "/api/v1/agent/run",
+        json={"task_id": "audit-outage-01", "objective": "Verify audit write errors do not fail normal task execution."},
+        headers=headers,
+    )
+    assert response.status_code == 202
+    status = client.get("/api/v1/agent/status/audit-outage-01", headers=headers)
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
+
+
+def test_task_admission_returns_429_at_capacity(tmp_path):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-capacity.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789", max_active_tasks=1,
+    )
+    app = create_app(settings=settings, workflow=build_workflow(settings))
+    assert app.state.verity_task_slots.acquire(blocking=False)
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/agent/run",
+            json={"task_id": "capacity-reject-01", "objective": "Verify that saturated task admission is bounded."},
+            headers={"X-API-Key": settings.api_key},
+        )
+        assert response.status_code == 429
+        assert response.headers["retry-after"] == "5"
+        assert app.state.verity_store.get("capacity-reject-01") is None
+    finally:
+        app.state.verity_task_slots.release()
+
+
+def test_failed_status_preserves_error_and_partial_checkpoint(tmp_path):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-failed.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789",
+    )
+
+    class FailingWorkflow:
+        def invoke(self, initial_state, config=None):
+            raise RuntimeError("provider returned internal diagnostic data")
+
+        def get_state(self, config):
+            return SimpleNamespace(values={
+                "task_id": "api-failed-01", "status": "researching", "retry_count": 1,
+                "execution_artifacts": [{"path": "partial/evidence.json"}],
+            })
+
+    app = create_app(settings=settings, workflow=FailingWorkflow())
+    client = TestClient(app)
+    headers = {"X-API-Key": settings.api_key}
+    response = client.post(
+        "/api/v1/agent/run",
+        json={"task_id": "api-failed-01", "objective": "Verify failure responses preserve partial workflow context."},
+        headers=headers,
+    )
+    assert response.status_code == 202
+    result = client.get("/api/v1/agent/status/api-failed-01", headers=headers).json()
+    assert result["status"] == "failed"
+    assert "RuntimeError" in result["error"]
+    assert "internal diagnostic data" not in result["error"]
+    assert result["retry_count"] == 1
+    assert result["artifacts"] == [{"path": "partial/evidence.json"}]
