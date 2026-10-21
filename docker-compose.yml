@@ -1,0 +1,20 @@
+services:
+  verity-core-agent:
+    build: .
+    container_name: verity-core-agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      VERITY_DATABASE_PATH: /app/data/verity.sqlite3
+      VERITY_OUTPUT_DIR: /app/outputs
+      VERITY_API_HOST: 0.0.0.0
+    volumes:
+      - verity_data:/app/data
+      - verity_outputs:/app/outputs
+    restart: unless-stopped
+
+volumes:
+  verity_data:
+  verity_outputs:

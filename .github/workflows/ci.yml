@@ -1,0 +1,39 @@
+name: Verity-1 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - name: Run unit and integration tests
+        env:
+          DRY_RUN_TEST_MODE: "true"
+          VERITY_RESEARCH_ENABLED: "false"
+          VERITY_ENABLE_CREWAI: "false"
+        run: pytest -v
+      - name: Run deterministic end-to-end smoke test
+        env:
+          DRY_RUN_TEST_MODE: "true"
+          VERITY_RESEARCH_ENABLED: "false"
+          VERITY_ENABLE_CREWAI: "false"
+          VERITY_OUTPUT_DIR: outputs-ci
+          VERITY_DATABASE_PATH: data-ci/verity.sqlite3
+        run: python main.py --test-e2e
