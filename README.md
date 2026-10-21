@@ -14,7 +14,7 @@
 
 **Plan → Research → Validate → Synthesize → Critique → Route**
 
-[Interactive Control Room](https://muhammadsaeed-ai.github.io/verity-core-agent/) · [Source Code](https://github.com/muhammadsaeed-ai/verity-core-agent) · [CI Runs](https://github.com/muhammadsaeed-ai/verity-core-agent/actions) · [API Docs (local)](#api-contract)
+[Interactive Showcase source](https://github.com/muhammadsaeed-ai/verity-core-agent/blob/main/docs/index.html) · [Source Code](https://github.com/muhammadsaeed-ai/verity-core-agent) · [CI Runs](https://github.com/muhammadsaeed-ai/verity-core-agent/actions) · [API Docs (local)](#api-contract)
 
 </div>
 
@@ -33,7 +33,7 @@ The outer graph owns state transitions and retry decisions. Specialist agents co
 <details>
 <summary><strong>▶ Play the animated workflow replay</strong></summary>
 <div align="center"><img src="docs/assets/workflow-replay.svg" alt="Animated Verity-1 execution trace showing plan, research, validation, synthesis, QA, and the retry loop" width="100%"></div>
-This is an illustrative motion diagram of the implemented control flow, not a recording of a live task or a live telemetry feed. The [interactive control room](https://muhammadsaeed-ai.github.io/verity-core-agent/) lets you replay the sequence and inspect the accepted and retry paths.
+This is an illustrative motion diagram of the implemented control flow, not a recording of a live task or a live telemetry feed. The interactive showcase source is [docs/index.html](https://github.com/muhammadsaeed-ai/verity-core-agent/blob/main/docs/index.html). To host it as a live site, open repository **Settings → Pages**, choose **GitHub Actions** as the source, then run **Deploy Verity-1 showcase** from the Actions tab. GitHub denied automatic Pages-site creation for this connection because it does not have the required repository-settings permission.
 </details>
 
 ## Verification, not vanity metrics
