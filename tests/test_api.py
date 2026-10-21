@@ -13,18 +13,18 @@ def test_api_accepts_run_and_returns_persisted_status(tmp_path) -> None:
     settings = replace(
         Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
         database_path=tmp_path / "api.sqlite3", output_dir=tmp_path / "outputs", n8n_webhook_url="",
-        api_key="test-verification-key",
+        api_key="test-verification-key-0123456789",
     )
     runtime = build_workflow(settings)
     client = TestClient(create_app(settings=settings, workflow=runtime))
     response = client.post(
         "/api/v1/agent/run",
         json={"task_id": "api-test-01", "objective": "Validate the API workflow and ensure the final report is persisted."},
-        headers={"X-API-Key": "test-verification-key"},
+        headers={"X-API-Key": "test-verification-key-0123456789"},
     )
     assert response.status_code == 202
     assert response.json()["task_id"] == "api-test-01"
-    status = client.get("/api/v1/agent/status/api-test-01", headers={"X-API-Key": "test-verification-key"})
+    status = client.get("/api/v1/agent/status/api-test-01", headers={"X-API-Key": "test-verification-key-0123456789"})
     assert status.status_code == 200
     body = status.json()
     assert body["status"] == "completed"
@@ -36,12 +36,12 @@ def test_api_returns_404_for_unknown_task(tmp_path) -> None:
     settings = replace(
         Settings.from_env(), dry_run_test_mode=True,
         database_path=tmp_path / "api-missing.sqlite3", output_dir=tmp_path / "outputs",
-        api_key="test-verification-key",
+        api_key="test-verification-key-0123456789",
     )
     runtime = build_workflow(settings)
     client = TestClient(create_app(settings=settings, workflow=runtime))
     assert client.get(
-        "/api/v1/agent/status/not-found", headers={"X-API-Key": "test-verification-key"}
+        "/api/v1/agent/status/not-found", headers={"X-API-Key": "test-verification-key-0123456789"}
     ).status_code == 404
 
 
@@ -50,7 +50,7 @@ def test_protected_api_rejects_missing_and_wrong_keys(tmp_path) -> None:
     settings = replace(
         Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
         database_path=tmp_path / "api-auth.sqlite3", output_dir=tmp_path / "outputs",
-        api_key="expected-secret",
+        api_key="expected-secret-0123456789abcdef",
     )
     client = TestClient(create_app(settings=settings, workflow=build_workflow(settings)))
     payload = {"objective": "Test that the authenticated task API rejects bad credentials."}
@@ -75,3 +75,16 @@ def test_protected_api_fails_closed_without_configured_key(tmp_path) -> None:
     )
     assert response.status_code == 503
     assert "VERITY_API_KEY" in response.json()["detail"]
+
+
+
+def test_openapi_documents_api_key_security_scheme(tmp_path) -> None:
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-openapi.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="expected-secret-0123456789abcdef",
+    )
+    client = TestClient(create_app(settings=settings, workflow=build_workflow(settings)))
+    spec = client.get("/openapi.json").json()
+    assert spec["components"]["securitySchemes"]["Verity API Key"]["name"] == "X-API-Key"
+    assert spec["paths"]["/api/v1/agent/run"]["post"]["security"] == [{"Verity API Key": []}]
