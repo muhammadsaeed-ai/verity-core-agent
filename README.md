@@ -38,7 +38,7 @@ This is an illustrative motion diagram of the implemented control flow, not a re
 
 ## Verification, not vanity metrics
 
-<div align="center"><img src="docs/assets/quality-policy.svg" alt="Verity-1 QA policy chart: 0.80 acceptance threshold, two maximum retries, ten automated tests passed, and five smoke-test artifact types" width="100%"></div>
+<div align="center"><img src="docs/assets/quality-policy.svg" alt="Verity-1 QA policy: 0.80 acceptance threshold, two maximum retries, four CI pipeline gates, and five smoke-test artifact types" width="100%"></div>
 
 These figures describe the current implementation and verified deterministic CI baseline. They are **not** claims about answer accuracy, latency, browser coverage, or production uptime.
 
@@ -192,7 +192,7 @@ For Playwright, install the browser binary once:
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}/artifacts/verify</code> | Verify generated artifact SHA-256 checksums and sizes |
 | <code>GET</code> | <code>/health</code> | Service liveness check |
 
-The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header. Optionally send an <code>Idempotency-Key</code> (8–128 letters, digits, dot, underscore, colon, or hyphen) to make retries safe: the same key and objective return the original task; reusing that key with a different objective returns <code>409</code>.
+The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header.
 
 For retry-safe client submissions, send a stable <code>Idempotency-Key</code> header (8–128 letters, digits, dots, underscores, colons, or hyphens). A repeated key with the same objective returns the original task without queueing a second execution. Reusing the key with a different objective returns <code>409</code>. Keys and task creation are recorded atomically in SQLite to handle concurrent retries. Example:
 
@@ -232,7 +232,7 @@ Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callbac
 | <code>VERITY_DATABASE_PATH</code> | <code>data/verity.sqlite3</code> | SQLite checkpoint/task database |
 | <code>VERITY_OUTPUT_DIR</code> | <code>outputs</code> | Artifact output root |
 | <code>N8N_WEBHOOK_URL</code> | empty | Trusted completion/failure callback |
-| <code>VERITY_API_KEY</code> | empty (protected API disabled) | Required secret for run/status endpoints; send as <code>X-API-Key</code> |
+| <code>VERITY_API_KEY</code> | empty (protected API disabled) | Required secret for all task endpoints; send as <code>X-API-Key</code> |
 | <code>VERITY_API_HOST</code> | <code>0.0.0.0</code> | API bind host |
 | <code>VERITY_API_PORT</code> | <code>8000</code> | API port |
 | <code>VERITY_MAX_ACTIVE_TASKS</code> | <code>4</code> | Per-process cap for queued/running requests; excess requests receive <code>429</code> |
