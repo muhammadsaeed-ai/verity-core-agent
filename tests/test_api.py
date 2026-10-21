@@ -265,3 +265,37 @@ def test_idempotency_key_rejects_a_different_objective(tmp_path):
     assert first.status_code == 202
     assert conflict.status_code == 409
     assert client.get("/api/v1/agent/tasks", headers={"X-API-Key": settings.api_key}).json()["count"] == 1
+
+
+def test_status_polling_does_not_query_locked_workflow_checkpoint(tmp_path):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-running-poll.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789",
+    )
+
+    class RunningWorkflow:
+        def invoke(self, initial_state, config=None):
+            raise AssertionError("This endpoint test must not execute a workflow.")
+
+        def get_state(self, config):
+            raise AssertionError("Normal polling must not block on the active workflow lock.")
+
+    app = create_app(settings=settings, workflow=RunningWorkflow())
+    task_id = "active-poll-01"
+    state = initial_state(task_id, "Verify status polling stays responsive while a task is running.")
+    app.state.verity_store.create(task_id, state["user_objective"], state)
+    app.state.verity_store.update(task_id, "running", state)
+    client = TestClient(app)
+    headers = {"X-API-Key": settings.api_key}
+
+    response = client.get(f"/api/v1/agent/status/{task_id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+
+    integrity = client.get(
+        f"/api/v1/agent/status/{task_id}/artifacts/verify", headers=headers
+    )
+    assert integrity.status_code == 200
+    assert integrity.json()["task_status"] == "running"
+    assert integrity.json()["checked_count"] == 0
