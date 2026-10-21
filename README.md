@@ -243,9 +243,9 @@ src/
 ├── graph/
 │   ├── state.py                   # Typed state contract
 │   └── workflow.py                # Graph nodes, QA routing, SQLite checkpoints
-├── api/
-│   ├── server.py                  # FastAPI + n8n gateway
-│   └── observability.py           # Task inventory and audit timeline
+└── api/
+    ├── server.py                  # FastAPI + n8n gateway
+    └── observability.py           # Task inventory and audit timeline
 scripts/browser_use_worker.py      # Isolated Browser Use worker
 main.py                            # CLI and server runner
 tests/                             # Unit, retry, API and workflow tests</code></pre>
