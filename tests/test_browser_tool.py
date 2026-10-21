@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+from src.tools.browser_tool import _normalize_url
+
+
+def test_url_normalizer_rejects_local_and_non_web_targets() -> None:
+    for url in (
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "http://localhost/admin",
+        "http://127.0.0.1:8000/docs",
+        "http://169.254.169.254/latest/meta-data",
+        "http://10.10.0.1/internal",
+        "http://printer.local/status",
+        "https://user:password@example.com/path",
+        "https://example.com:8443/path",
+    ):
+        assert _normalize_url(url) is None, url
+
+
+def test_url_normalizer_keeps_public_http_urls_and_unwraps_search_redirects() -> None:
+    assert _normalize_url("https://example.com/article#fragment") == "https://example.com/article"
+    assert _normalize_url(
+        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Farticle"
+    ) == "https://example.com/article"
+    assert _normalize_url("https://duckduckgo.com/l/?uddg=http%3A%2F%2F127.0.0.1%2F") is None
