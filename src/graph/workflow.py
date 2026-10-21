@@ -11,12 +11,25 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from src.config import Settings, ask_model
+from src.api.integrity import verify_artifact_records
 from src.schemas import AgentPlan, AgentReport, ArtifactRecord, PlanStep, QAFeedback, ResearchItem
 from src.tools.browser_tool import BrowserUseTool
 from src.tools.code_sandbox import write_artifact
 from src.graph.state import VerityState
 
 logger = logging.getLogger(__name__)
+
+
+def _requires_external_evidence(objective: str, plan: AgentPlan) -> bool:
+    """Identify objectives that explicitly require timely or sourced information."""
+    terms = (
+        "research", "current", "latest", "today", "yesterday", "this week", "this month",
+        "source", "citation", "cite", "market", "competitor", "pricing", "statistics",
+        "compare", "comparison", "benchmark", "fact check", "news", "legal",
+        "regulation", "policy", "release notes", "documentation",
+    )
+    text = (objective + " " + " ".join(plan.acceptance_criteria)).casefold()
+    return any(term in text for term in terms)
 
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -247,6 +260,42 @@ def _qa_node(settings: Settings, qa_scores: list[float] | None) -> Callable[[Ver
                 verification = "Critic response was missing or failed strict schema validation."
                 issues = ["Critic response could not be validated: " + type(exc).__name__]
                 retry_feedback = "Return valid JSON with confidence, issues, retry_feedback, and verification_summary."
+        # Apply deterministic preconditions independently of the model's self-reported score.
+        hard_gate_issues: list[str] = []
+        if not settings.dry_run_test_mode and _requires_external_evidence(state["user_objective"], plan):
+            has_citable_evidence = any(
+                item.url is not None
+                and item.url.startswith(("http://", "https://"))
+                and bool(item.snippet.strip())
+                for item in evidence
+            )
+            if not has_citable_evidence:
+                hard_gate_issues.append(
+                    "This objective calls for external research or citations, but no usable sourced evidence was collected."
+                )
+
+        integrity = verify_artifact_records(
+            settings.output_dir,
+            state["task_id"],
+            [item.model_dump(mode="json") for item in artifacts],
+        )
+        if not integrity["integrity_verified"]:
+            hard_gate_issues.append(
+                f"Artifact integrity check failed for {integrity['failed_count']} of {integrity['checked_count']} recorded artifacts."
+            )
+
+        if hard_gate_issues:
+            confidence = min(float(confidence), 0.79)
+            issues = list(issues) + hard_gate_issues
+            retry_feedback = (
+                "Resolve the deterministic QA blockers: collect usable public-source evidence where required, "
+                "and regenerate or repair every artifact that fails its SHA-256/size verification. "
+                + (retry_feedback or "")
+            ).strip()
+            verification = (
+                (verification.rstrip() + " ") if verification else ""
+            ) + "Deterministic evidence and artifact-integrity gates were applied independently of the model score."
+
         confidence = max(0.0, min(1.0, confidence))
         passed = confidence >= 0.8
         retry_count = int(state.get("retry_count", 0))
