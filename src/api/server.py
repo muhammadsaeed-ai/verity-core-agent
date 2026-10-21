@@ -39,6 +39,8 @@ class TaskStore:
         self.database_path = database_path
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(database_path), timeout=30) as connection:
+            # Serialize first-run creation and in-place schema migration across app processes.
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verity_tasks (task_id TEXT PRIMARY KEY, objective TEXT NOT NULL, "
                 "status TEXT NOT NULL, state_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
@@ -51,6 +53,10 @@ class TaskStore:
                 connection.execute("ALTER TABLE verity_tasks ADD COLUMN lease_until TEXT")
             if "attempts" not in columns:
                 connection.execute("ALTER TABLE verity_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_verity_tasks_claim "
+                "ON verity_tasks(status, lease_until, created_at)"
+            )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verity_idempotency_keys ("
                 "idempotency_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE, "
