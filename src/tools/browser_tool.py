@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -34,20 +35,54 @@ class BrowserSearchInput(BaseModel):
 
 
 def _normalize_url(href: str) -> str | None:
+    """Normalize public web URLs and reject local, credentialed, or non-web targets."""
     if not href:
         return None
-    href = href.strip()
-    if href.startswith("//"):
-        href = "https:" + href
-    parsed = urlparse(href)
-    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
-        target = parse_qs(parsed.query).get("uddg", [None])[0]
-        if target:
-            href = target
-            parsed = urlparse(href)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    try:
+        href = href.strip()
+        if href.startswith("//"):
+            href = "https:" + href
+        parsed = urlparse(href)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        if not hostname:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        if port not in {None, 80, 443}:
+            return None
+        blocked_suffixes = (
+            ".localhost", ".local", ".internal", ".lan", ".home",
+            ".test", ".example", ".invalid",
+        )
+        if hostname == "localhost" or hostname.endswith(blocked_suffixes):
+            return None
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            if "." not in hostname:
+                return None
+            try:
+                hostname.encode("idna").decode("ascii")
+            except UnicodeError:
+                return None
+        else:
+            if not address.is_global:
+                return None
+
+        if hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com"):
+            if parsed.path.startswith("/l/"):
+                target = parse_qs(parsed.query).get("uddg", [None])[0]
+                if target:
+                    return _normalize_url(target)
+        return urlunparse((parsed.scheme.lower(), parsed.netloc, parsed.path, "", parsed.query, ""))
+    except (ValueError, UnicodeError):
         return None
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
 
 
 def _parse_ddg_html(html: str, limit: int = 8) -> list[dict[str, str]]:
@@ -89,7 +124,7 @@ class BrowserUseTool(BaseTool):
         return json.dumps(self.search(query), ensure_ascii=False)
 
     def search(self, query: str) -> dict[str, Any]:
-        query = query.strip()
+        query = query.strip()[:500].rstrip()
         if len(query) < 2:
             return {"query": query, "results": [], "method": "validation"}
         methods = []
