@@ -189,6 +189,7 @@ For Playwright, install the browser binary once:
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}</code> | Read task status, QA feedback and artifacts |
 | <code>GET</code> | <code>/api/v1/agent/tasks</code> | Filtered, paginated task inventory |
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}/events</code> | Ordered audit timeline with incremental cursor |
+| <code>GET</code> | <code>/api/v1/agent/status/{task_id}/artifacts/verify</code> | Verify generated artifact SHA-256 checksums and sizes |
 | <code>GET</code> | <code>/health</code> | Service liveness check |
 
 The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header. Optionally send an <code>Idempotency-Key</code> (8–128 letters, digits, dot, underscore, colon, or hyphen) to make retries safe: the same key and objective return the original task; reusing that key with a different objective returns <code>409</code>.
@@ -204,6 +205,15 @@ curl -X POST http://127.0.0.1:8000/api/v1/agent/run \
 ```
 
 Idempotency prevents duplicate accepted submissions; it does not turn FastAPI background tasks into a durable queue. A process restart can still interrupt work accepted just before it starts.
+
+Verify generated artifacts without downloading their contents:
+
+```bash
+curl -H "X-API-Key: YOUR_VERITY_API_KEY" \
+  "http://127.0.0.1:8000/api/v1/agent/status/YOUR_TASK_ID/artifacts/verify"
+```
+
+The integrity endpoint checks each recorded file's SHA-256 digest and byte count. It returns per-artifact states such as <code>verified</code>, <code>mismatch</code>, <code>missing</code>, <code>invalid_path</code>, and <code>rejected_symlink</code>. It restricts records to files directly inside that task's output directory, rejects path traversal and symlinks, and never returns artifact contents. This proves consistency with the stored manifest—not the truth or safety of the underlying artifact.
 
 Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callback URLs are operator configuration, not accepted from public run requests.
 
@@ -257,7 +267,8 @@ src/
 │   └── workflow.py                # Graph nodes, QA routing, SQLite checkpoints
 └── api/
     ├── server.py                  # FastAPI + n8n gateway
-    └── observability.py           # Task inventory and audit timeline
+    ├── observability.py           # Task inventory and audit timeline
+    └── integrity.py               # Safe SHA-256 artifact verification
 scripts/browser_use_worker.py      # Isolated Browser Use worker
 main.py                            # CLI and server runner
 tests/                             # Unit, retry, API and workflow tests</code></pre>
