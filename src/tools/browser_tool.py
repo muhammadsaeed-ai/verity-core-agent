@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -68,8 +69,20 @@ def _normalize_url(href: str) -> str | None:
             if "." not in hostname:
                 return None
             try:
-                hostname.encode("idna").decode("ascii")
+                ascii_hostname = hostname.encode("idna").decode("ascii")
             except UnicodeError:
+                return None
+            labels = ascii_hostname.split(".")
+            if len(ascii_hostname) > 253 or any(
+                not label
+                or len(label) > 63
+                or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+                for label in labels
+            ):
+                return None
+            # Browsers accept shorthand numeric IPv4 forms such as 127.1.
+            # If ipaddress did not parse it above, do not treat it as a DNS name.
+            if all(label.isdigit() for label in labels):
                 return None
         else:
             if not address.is_global:
