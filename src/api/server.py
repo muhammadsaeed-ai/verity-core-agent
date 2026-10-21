@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,11 +65,22 @@ class TaskStore:
 
 
 def _post_webhook(url: str, payload: dict[str, Any]) -> None:
+    """Send a trusted callback without changing the workflow outcome on failure."""
     if not url:
         return
-    parsed = urlparse(url)
-    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
-        logger.warning("N8N_WEBHOOK_URL is not a valid HTTP(S) URL; callback skipped.")
+    try:
+        parsed = urlparse(url)
+        _ = parsed.port
+        if (
+            parsed.scheme not in {"https", "http"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            logger.warning("N8N_WEBHOOK_URL is not a valid HTTP(S) URL; callback skipped.")
+            return
+    except ValueError:
+        logger.warning("N8N_WEBHOOK_URL is malformed; callback skipped.")
         return
     request = Request(
         url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -78,8 +90,21 @@ def _post_webhook(url: str, payload: dict[str, Any]) -> None:
         with urlopen(request, timeout=5) as response:
             if response.status >= 400:
                 logger.warning("n8n callback returned HTTP %s.", response.status)
-    except (URLError, TimeoutError, OSError) as exc:
-        logger.warning("n8n callback failed without changing task status: %s", exc)
+    except Exception as exc:
+        logger.warning("n8n callback failed without changing task status (%s).", type(exc).__name__)
+
+
+def _append_event_safely(
+    events: TaskEventStore, task_id: str, event_type: str, payload: dict[str, Any] | None = None
+) -> None:
+    """Audit events are best-effort; an observability outage must not fail the workflow."""
+    try:
+        events.append(task_id, event_type, payload)
+    except Exception:
+        logger.exception(
+            "Could not persist audit event %s for task %s; execution will continue.",
+            event_type, task_id,
+        )
 
 
 def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | None = None) -> FastAPI:
@@ -87,6 +112,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     runtime = workflow or build_workflow(chosen)
     store = TaskStore(chosen.database_path)
     events = TaskEventStore(chosen.database_path)
+    task_slots = threading.BoundedSemaphore(chosen.max_active_tasks)
     app = FastAPI(
         title="Verity-1 Agent API", version="1.0.0",
         description="Hybrid autonomous workflow runner with Pydantic contracts and SQLite-backed state.",
@@ -95,6 +121,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     app.state.verity_workflow = runtime
     app.state.verity_store = store
     app.state.verity_events = events
+    app.state.verity_task_slots = task_slots
 
     api_key_header = APIKeyHeader(
         name="X-API-Key", scheme_name="Verity API Key", auto_error=False
@@ -118,31 +145,74 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
 
     def run_task(task_id: str, objective: str) -> None:
         state = initial_state(task_id, objective)
-        events.append(task_id, "task.started", {"objective_length": len(objective)})
-        store.update(task_id, "running", state)
-        events.append(task_id, "task.status_changed", {"status": "running"})
+        config = {"configurable": {"thread_id": task_id}}
         try:
-            result = runtime.invoke(state, config={"configurable": {"thread_id": task_id}})
+            _append_event_safely(events, task_id, "task.started", {"objective_length": len(objective)})
+            store.update(task_id, "running", state)
+            _append_event_safely(events, task_id, "task.status_changed", {"status": "running"})
+            result = runtime.invoke(state, config=config)
             status = str(result.get("status", "failed"))
-            store.update(task_id, status, result)
-            events.append(task_id, "task.status_changed", {"status": status, "retry_count": result.get("retry_count", 0)})
-            events.append(task_id, "task.finished", {"status": status, "artifact_count": len(result.get("execution_artifacts", []))})
+            if status not in {"completed", "needs_review", "failed"}:
+                raise RuntimeError("Workflow returned an invalid terminal status.")
+        except Exception as exc:
+            logger.exception("Task %s failed.", task_id)
+            failed_state = dict(state)
+            try:
+                snapshot = runtime.get_state(config)
+                checkpoint_values = getattr(snapshot, "values", {}) or {}
+                if isinstance(checkpoint_values, dict):
+                    failed_state.update(checkpoint_values)
+            except Exception:
+                logger.debug("Unable to load partial state after task failure.", exc_info=True)
+            safe_error = f"{type(exc).__name__}: task execution failed. Inspect server logs using the task ID."
+            failed_state.update(status="failed", error=safe_error)
+            try:
+                store.update(task_id, "failed", failed_state)
+            except Exception:
+                logger.exception("Could not persist failed status for task %s.", task_id)
+            _append_event_safely(events, task_id, "task.failed", {"error_type": type(exc).__name__})
             _post_webhook(chosen.n8n_webhook_url, {
+                "event": "verity.task.failed", "task_id": task_id,
+                "status": "failed", "error": safe_error,
+            })
+            return
+
+        try:
+            store.update(task_id, status, result)
+        except Exception:
+            logger.exception("Workflow for task %s returned %s but task status persistence failed.", task_id, status)
+            _append_event_safely(events, task_id, "task.status_persistence_failed", {"workflow_status": status})
+            return
+
+        _append_event_safely(
+            events, task_id, "task.status_changed",
+            {"status": status, "retry_count": result.get("retry_count", 0)},
+        )
+        if status == "failed":
+            _append_event_safely(events, task_id, "task.failed", {"error_type": "WorkflowFailed"})
+            callback_payload = {
+                "event": "verity.task.failed", "task_id": task_id, "status": status,
+                "error": "Workflow returned a failed terminal status.",
+            }
+        else:
+            _append_event_safely(
+                events, task_id, "task.finished",
+                {"status": status, "artifact_count": len(result.get("execution_artifacts", []))},
+            )
+            callback_payload = {
                 "event": "verity.task.completed" if status == "completed" else "verity.task.finished",
                 "task_id": task_id, "status": status, "objective": objective,
                 "retry_count": result.get("retry_count", 0), "qa_feedback": result.get("qa_feedback", {}),
                 "artifacts": result.get("execution_artifacts", []), "report": result.get("final_report", {}),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
-        except Exception as exc:
-            logger.exception("Task %s failed.", task_id)
-            failed = {**state, "status": "failed", "error": type(exc).__name__ + ": " + str(exc)[:800]}
-            store.update(task_id, "failed", failed)
-            events.append(task_id, "task.failed", {"error_type": type(exc).__name__})
-            _post_webhook(chosen.n8n_webhook_url, {
-                "event": "verity.task.failed", "task_id": task_id,
-                "status": "failed", "error": failed["error"],
-            })
+            }
+        _post_webhook(chosen.n8n_webhook_url, callback_payload)
+
+    def run_task_with_slot(task_id: str, objective: str) -> None:
+        try:
+            run_task(task_id, objective)
+        finally:
+            task_slots.release()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -154,13 +224,27 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         background_tasks: BackgroundTasks,
         _auth: None = Depends(require_api_key),
     ) -> dict[str, Any]:
+        if not task_slots.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Task capacity is full ({chosen.max_active_tasks} active or queued per process). Retry after a task finishes.",
+                headers={"Retry-After": "5"},
+            )
         state = initial_state(request.task_id, request.user_objective)
         try:
             store.create(request.task_id, request.user_objective, state)
-            events.append(request.task_id, "task.queued", {"objective_length": len(request.user_objective)})
         except sqlite3.IntegrityError as exc:
+            task_slots.release()
             raise HTTPException(status_code=409, detail="task_id already exists; use a new task_id.") from exc
-        background_tasks.add_task(run_task, request.task_id, request.user_objective)
+        except Exception:
+            task_slots.release()
+            raise
+        _append_event_safely(events, request.task_id, "task.queued", {"objective_length": len(request.user_objective)})
+        try:
+            background_tasks.add_task(run_task_with_slot, request.task_id, request.user_objective)
+        except Exception:
+            task_slots.release()
+            raise
         return {
             "task_id": request.task_id, "status": "queued",
             "status_url": f"/api/v1/agent/status/{request.task_id}",
@@ -205,7 +289,8 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
             values = {}
         if record is None and not values:
             raise HTTPException(status_code=404, detail="Task was not found.")
-        selected = values or (record or {}).get("state", {})
+        record_state = (record or {}).get("state", {})
+        selected = {**record_state, **values}
         status = (record or {}).get("status") or selected.get("status", "unknown")
         return {
             "task_id": task_id, "status": status, "retry_count": selected.get("retry_count", 0),
