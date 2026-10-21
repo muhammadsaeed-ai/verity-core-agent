@@ -293,6 +293,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     lease_seconds = max(30, min(300, chosen.model_timeout_seconds))
     worker_stop = threading.Event()
     worker_lock = threading.Lock()
+    claim_lock = threading.Lock()
     worker_threads: list[threading.Thread] = []
     app = FastAPI(
         title="Verity-1 Agent API", version="1.0.0",
@@ -442,7 +443,10 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         try:
             while not worker_stop.is_set():
                 try:
-                    claimed = store.claim_next(worker_id, lease_seconds)
+                    # Serialize claims inside this process; SQLite leases still coordinate
+                    # distinct processes, while this avoids a startup burst of writer locks.
+                    with claim_lock:
+                        claimed = store.claim_next(worker_id, lease_seconds)
                 except Exception:
                     logger.exception("Worker %s could not claim a durable task.", worker_id)
                     worker_stop.wait(1.0)
