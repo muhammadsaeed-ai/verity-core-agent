@@ -13,11 +13,12 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.security import APIKeyHeader
 
 from src.config import Settings
 from src.graph.workflow import WorkflowRuntime, build_workflow, initial_state
+from src.api.observability import TaskEventStore
 from src.schemas import TaskRunRequest
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     chosen = settings or Settings.from_env()
     runtime = workflow or build_workflow(chosen)
     store = TaskStore(chosen.database_path)
+    events = TaskEventStore(chosen.database_path)
     app = FastAPI(
         title="Verity-1 Agent API", version="1.0.0",
         description="Hybrid autonomous workflow runner with Pydantic contracts and SQLite-backed state.",
@@ -92,6 +94,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     app.state.verity_settings = chosen
     app.state.verity_workflow = runtime
     app.state.verity_store = store
+    app.state.verity_events = events
 
     api_key_header = APIKeyHeader(
         name="X-API-Key", scheme_name="Verity API Key", auto_error=False
@@ -115,11 +118,15 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
 
     def run_task(task_id: str, objective: str) -> None:
         state = initial_state(task_id, objective)
+        events.append(task_id, "task.started", {"objective_length": len(objective)})
         store.update(task_id, "running", state)
+        events.append(task_id, "task.status_changed", {"status": "running"})
         try:
             result = runtime.invoke(state, config={"configurable": {"thread_id": task_id}})
             status = str(result.get("status", "failed"))
             store.update(task_id, status, result)
+            events.append(task_id, "task.status_changed", {"status": status, "retry_count": result.get("retry_count", 0)})
+            events.append(task_id, "task.finished", {"status": status, "artifact_count": len(result.get("execution_artifacts", []))})
             _post_webhook(chosen.n8n_webhook_url, {
                 "event": "verity.task.completed" if status == "completed" else "verity.task.finished",
                 "task_id": task_id, "status": status, "objective": objective,
@@ -131,6 +138,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
             logger.exception("Task %s failed.", task_id)
             failed = {**state, "status": "failed", "error": type(exc).__name__ + ": " + str(exc)[:800]}
             store.update(task_id, "failed", failed)
+            events.append(task_id, "task.failed", {"error_type": type(exc).__name__})
             _post_webhook(chosen.n8n_webhook_url, {
                 "event": "verity.task.failed", "task_id": task_id,
                 "status": "failed", "error": failed["error"],
@@ -149,6 +157,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         state = initial_state(request.task_id, request.user_objective)
         try:
             store.create(request.task_id, request.user_objective, state)
+            events.append(request.task_id, "task.queued", {"objective_length": len(request.user_objective)})
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="task_id already exists; use a new task_id.") from exc
         background_tasks.add_task(run_task, request.task_id, request.user_objective)
@@ -157,6 +166,31 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
             "status_url": f"/api/v1/agent/status/{request.task_id}",
             "message": "Task accepted. Poll the status URL for persisted workflow state.",
         }
+
+    @app.get("/api/v1/agent/tasks")
+    def list_agent_tasks(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        status: str | None = Query(default=None, pattern=r"^(queued|running|completed|needs_review|failed)$"),
+        _auth: None = Depends(require_api_key),
+    ) -> dict[str, Any]:
+        items = events.list_tasks(limit=limit, offset=offset, status=status)
+        return {"items": items, "limit": limit, "offset": offset, "count": len(items), "status_filter": status}
+
+    @app.get("/api/v1/agent/status/{task_id}/events")
+    def get_agent_events(
+        task_id: str,
+        limit: int = Query(default=100, ge=1, le=500),
+        after_id: int = Query(default=0, ge=0),
+        _auth: None = Depends(require_api_key),
+    ) -> dict[str, Any]:
+        if not task_id or len(task_id) > 80 or any(not (ch.isalnum() or ch in "_-") for ch in task_id):
+            raise HTTPException(status_code=422, detail="Invalid task_id.")
+        if store.get(task_id) is None:
+            raise HTTPException(status_code=404, detail="Task was not found.")
+        items = events.list_events(task_id, limit=limit, after_id=after_id)
+        return {"task_id": task_id, "items": items, "limit": limit, "after_id": after_id,
+                "next_after_id": items[-1]["event_id"] if items else after_id}
 
     @app.get("/api/v1/agent/status/{task_id}")
     def get_agent_status(task_id: str, _auth: None = Depends(require_api_key)) -> dict[str, Any]:
