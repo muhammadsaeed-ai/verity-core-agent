@@ -47,6 +47,7 @@ class Settings:
     api_key: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    max_active_tasks: int = 4
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -63,6 +64,9 @@ class Settings:
         api_port = int(os.getenv("VERITY_API_PORT", "8000"))
         if not 1 <= api_port <= 65535:
             raise ValueError("VERITY_API_PORT must be between 1 and 65535.")
+        max_active_tasks = int(os.getenv("VERITY_MAX_ACTIVE_TASKS", "4"))
+        if not 1 <= max_active_tasks <= 32:
+            raise ValueError("VERITY_MAX_ACTIVE_TASKS must be between 1 and 32.")
         api_key = os.getenv("VERITY_API_KEY", "").strip()
         if api_key and len(api_key) < 32:
             raise ValueError("VERITY_API_KEY must contain at least 32 characters.")
@@ -84,6 +88,7 @@ class Settings:
             api_key=api_key,
             api_host=os.getenv("VERITY_API_HOST", "0.0.0.0").strip(),
             api_port=api_port,
+            max_active_tasks=max_active_tasks,
         )
 
 
