@@ -41,6 +41,7 @@ class Settings:
     research_enabled: bool = True
     enable_crewai: bool = True
     browser_timeout_seconds: int = 15
+    model_timeout_seconds: int = 180
     database_path: Path = Path("data/verity.sqlite3")
     output_dir: Path = Path("outputs")
     n8n_webhook_url: str = ""
@@ -67,6 +68,9 @@ class Settings:
         max_active_tasks = int(os.getenv("VERITY_MAX_ACTIVE_TASKS", "4"))
         if not 1 <= max_active_tasks <= 32:
             raise ValueError("VERITY_MAX_ACTIVE_TASKS must be between 1 and 32.")
+        model_timeout_seconds = int(os.getenv("VERITY_MODEL_TIMEOUT_SECONDS", "180"))
+        if not 5 <= model_timeout_seconds <= 600:
+            raise ValueError("VERITY_MODEL_TIMEOUT_SECONDS must be between 5 and 600 seconds.")
         api_key = os.getenv("VERITY_API_KEY", "").strip()
         if api_key and len(api_key) < 32:
             raise ValueError("VERITY_API_KEY must contain at least 32 characters.")
@@ -82,6 +86,7 @@ class Settings:
             research_enabled=_env_bool("VERITY_RESEARCH_ENABLED", True),
             enable_crewai=_env_bool("VERITY_ENABLE_CREWAI", True),
             browser_timeout_seconds=max(3, min(60, int(os.getenv("VERITY_BROWSER_TIMEOUT_SECONDS", "15")))),
+            model_timeout_seconds=model_timeout_seconds,
             database_path=Path(os.getenv("VERITY_DATABASE_PATH", "data/verity.sqlite3")),
             output_dir=Path(os.getenv("VERITY_OUTPUT_DIR", "outputs")),
             n8n_webhook_url=os.getenv("N8N_WEBHOOK_URL", "").strip(),
