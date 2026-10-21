@@ -330,9 +330,10 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                 if existing_task is None:
                     logger.error("Idempotency record refers to missing task %s.", prior["task_id"])
                     raise HTTPException(status_code=500, detail="Idempotency record is inconsistent; contact the operator.")
+                _, existing_status = load_task_snapshot(prior["task_id"], existing_task)
                 return {
                     "task_id": prior["task_id"],
-                    "status": existing_task["status"],
+                    "status": existing_status,
                     "status_url": f"/api/v1/agent/status/{prior['task_id']}",
                     "message": "Returning the original task; this Idempotency-Key has already been processed.",
                     "idempotent_replay": True,
@@ -365,9 +366,10 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                     raise HTTPException(status_code=500, detail="Idempotency record is inconsistent; contact the operator.")
                 task_slots.release()
                 slot_released = True
+                _, existing_status = load_task_snapshot(actual_task_id, existing_task)
                 return {
                     "task_id": actual_task_id,
-                    "status": existing_task["status"],
+                    "status": existing_status,
                     "status_url": f"/api/v1/agent/status/{actual_task_id}",
                     "message": "Returning the original task; this Idempotency-Key has already been processed.",
                     "idempotent_replay": True,
@@ -428,41 +430,18 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
         record = store.get(task_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Task was not found.")
-        selected = dict(record.get("state", {}))
-        try:
-            snapshot = runtime.get_state({"configurable": {"thread_id": task_id}})
-            values = getattr(snapshot, "values", {}) or {}
-            if isinstance(values, dict):
-                selected.update(values)
-        except Exception:
-            logger.warning("Checkpoint lookup failed during artifact verification for %s.", task_id)
-        result = verify_artifact_records(
-            chosen.output_dir, task_id, selected.get("execution_artifacts", [])
-        )
-        result["task_status"] = record.get("status", selected.get("status", "unknown"))
+        selected, status = load_task_snapshot(task_id, record)
+        result = verify_artifact_records(chosen.output_dir, task_id, selected.get("execution_artifacts", []))
+        result["task_status"] = status
         return result
-
     @app.get("/api/v1/agent/status/{task_id}")
     def get_agent_status(task_id: str, _auth: None = Depends(require_api_key)) -> dict[str, Any]:
         if not task_id or len(task_id) > 80 or any(not (ch.isalnum() or ch in "_-") for ch in task_id):
             raise HTTPException(status_code=422, detail="Invalid task_id.")
         record = store.get(task_id)
-        try:
-            snapshot = runtime.get_state({"configurable": {"thread_id": task_id}})
-            values = getattr(snapshot, "values", {}) or {}
-        except Exception as exc:
-            logger.warning("Checkpoint lookup failed for %s: %s", task_id, exc)
-            values = {}
-        if record is None and not values:
+        if record is None:
             raise HTTPException(status_code=404, detail="Task was not found.")
-        record_state = (record or {}).get("state", {})
-        selected = {**record_state, **values}
-        record_status = (record or {}).get("status")
-        checkpoint_status = values.get("status") if isinstance(values, dict) else None
-        if record_status in {"queued", "running"} and checkpoint_status in {"completed", "needs_review", "failed"}:
-            status = checkpoint_status
-        else:
-            status = record_status or selected.get("status", "unknown")
+        selected, status = load_task_snapshot(task_id, record)
         return {
             "task_id": task_id, "status": status, "retry_count": selected.get("retry_count", 0),
             "qa_feedback": selected.get("qa_feedback", {}), "artifacts": selected.get("execution_artifacts", []),
