@@ -110,12 +110,18 @@ def build_chat_model(settings: Settings | None = None) -> Any:
             from langchain_google_genai import ChatGoogleGenerativeAI
         except ImportError as exc:
             raise RuntimeError("Install requirements.txt to enable Gemini.") from exc
-        return ChatGoogleGenerativeAI(model=chosen.gemini_model, google_api_key=key, temperature=0)
+        return ChatGoogleGenerativeAI(
+            model=chosen.gemini_model, google_api_key=key, temperature=0,
+            timeout=chosen.model_timeout_seconds, max_retries=1,
+        )
     try:
         from langchain_ollama import ChatOllama
     except ImportError as exc:
         raise RuntimeError("Install requirements.txt to enable Ollama.") from exc
-    return ChatOllama(model=chosen.ollama_model, base_url=chosen.ollama_base_url, temperature=0)
+    return ChatOllama(
+        model=chosen.ollama_model, base_url=chosen.ollama_base_url, temperature=0,
+        client_kwargs={"timeout": chosen.model_timeout_seconds},
+    )
 
 
 def ask_model(prompt: str, settings: Settings | None = None) -> str:
