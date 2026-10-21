@@ -33,6 +33,17 @@ def test_sandbox_metrics_and_json_artifact(tmp_path) -> None:
     assert json.loads(path.read_text(encoding="utf-8"))["result"]["count"] == 3
 
 
+def test_sandbox_payload_uses_stdin_for_large_arguments(tmp_path) -> None:
+    large_text = "x" * 180_000
+    result = execute_python(
+        'result = len(data["text"])',
+        {"text": large_text},
+        task_id="large-input-test",
+        output_dir=tmp_path,
+    )
+    assert result["result"] == len(large_text)
+
+
 def test_sandbox_rejects_unsafe_imports_and_dunder_access() -> None:
     with pytest.raises(ValueError):
         validate_python_source("import os\nresult = os.listdir('.')")
