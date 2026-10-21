@@ -191,7 +191,7 @@ For Playwright, install the browser binary once:
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}/events</code> | Ordered audit timeline with incremental cursor |
 | <code>GET</code> | <code>/health</code> | Service liveness check |
 
-The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header.
+The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header. Optionally send an <code>Idempotency-Key</code> (8–128 letters, digits, dot, underscore, colon, or hyphen) to make retries safe: the same key and objective return the original task; reusing that key with a different objective returns <code>409</code>.
 
 For retry-safe client submissions, send a stable <code>Idempotency-Key</code> header (8–128 letters, digits, dots, underscores, colons, or hyphens). A repeated key with the same objective returns the original task without queueing a second execution. Reusing the key with a different objective returns <code>409</code>. Keys and task creation are recorded atomically in SQLite to handle concurrent retries. Example:
 
@@ -267,7 +267,7 @@ tests/                             # Unit, retry, API and workflow tests</code><
 - QA confidence is an automated signal, not proof of factual correctness.
 - A source URL shows that a result was retrieved; it does not prove every associated claim.
 - Browser navigation requires installed browser dependencies; the HTTP parser is the final fallback.
-- Run/status API routes require <code>X-API-Key</code>; they return <code>503</code> until <code>VERITY_API_KEY</code> is configured and <code>401</code> for missing or incorrect keys. Keep the key private and use TLS behind a trusted reverse proxy for remote deployment.
+- All task API routes (run, status, inventory, and audit events) require <code>X-API-Key</code>; they return <code>503</code> until <code>VERITY_API_KEY</code> is configured and <code>401</code> for missing or incorrect keys. Keep the key private and use TLS behind a trusted reverse proxy for remote deployment.
 - The restricted Python runner uses a separate process, timeout, and best-effort OS resource limits where supported. It is still defense-in-depth, not a secure multi-tenant OS sandbox; do not expose arbitrary submitted code as a service without stronger container/VM isolation.
 - URL normalization rejects non-HTTP schemes, credentialed URLs, local/private IPs, intranet hostnames, and unusual ports. These checks reduce unsafe results but do not replace network-egress controls or protection against DNS rebinding in a browser worker.
 - The n8n callback is outbound network traffic. Configure a destination you control.
