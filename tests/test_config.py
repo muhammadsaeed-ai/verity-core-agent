@@ -22,3 +22,9 @@ def test_short_api_key_is_rejected(monkeypatch) -> None:
     monkeypatch.setenv("VERITY_API_KEY", "short")
     with pytest.raises(ValueError, match="at least 32 characters"):
         Settings.from_env()
+
+
+def test_active_task_limit_rejects_too_high(monkeypatch):
+    monkeypatch.setenv('VERITY_MAX_ACTIVE_TASKS', '33')
+    with pytest.raises(ValueError):
+        Settings.from_env()
