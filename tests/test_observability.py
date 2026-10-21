@@ -72,6 +72,8 @@ def test_task_inventory_filters_status_and_paginates(tmp_path):
     assert completed[0]["task_id"] != next_page[0]["task_id"]
     assert len(all_tasks) == 2
     assert all_tasks[0]["updated_at"] >= all_tasks[1]["updated_at"]
+    assert store.count_tasks() == 3
+    assert store.count_tasks(status="completed") == 2
 
 
 def test_task_inventory_pagination_is_stable_for_equal_timestamps(tmp_path):
