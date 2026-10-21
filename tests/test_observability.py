@@ -77,6 +77,12 @@ def test_task_inventory_filters_status_and_paginates(tmp_path):
 def test_task_inventory_pagination_is_stable_for_equal_timestamps(tmp_path):
     database = tmp_path / "events-tied-timestamps.sqlite3"
     _seed_tasks(database)
+    tied_timestamp = "2026-10-21T00:00:00+00:00"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE verity_tasks SET updated_at=? WHERE task_id IN ('task-a', 'task-c')",
+            (tied_timestamp,),
+        )
     store = TaskEventStore(database)
     page_one = store.list_tasks(status="completed", limit=1, offset=0)
     page_two = store.list_tasks(status="completed", limit=1, offset=1)
