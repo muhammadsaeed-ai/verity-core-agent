@@ -187,6 +187,8 @@ For Playwright, install the browser binary once:
 |---|---|---|
 | <code>POST</code> | <code>/api/v1/agent/run</code> | Accept a task and return its ID |
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}</code> | Read task status, QA feedback and artifacts |
+| <code>GET</code> | <code>/api/v1/agent/tasks</code> | Filtered, paginated task inventory |
+| <code>GET</code> | <code>/api/v1/agent/status/{task_id}/events</code> | Ordered audit timeline with incremental cursor |
 | <code>GET</code> | <code>/health</code> | Service liveness check |
 
 The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>.
