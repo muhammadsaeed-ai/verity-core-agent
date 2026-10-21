@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -14,7 +16,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.security import APIKeyHeader
 
 from src.config import Settings
@@ -34,6 +36,11 @@ class TaskStore:
                 "CREATE TABLE IF NOT EXISTS verity_tasks (task_id TEXT PRIMARY KEY, objective TEXT NOT NULL, "
                 "status TEXT NOT NULL, state_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS verity_idempotency_keys ("
+                "idempotency_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE, "
+                "created_at TEXT NOT NULL)"
+            )
 
     def create(self, task_id: str, objective: str, state: dict[str, Any]) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -42,6 +49,59 @@ class TaskStore:
                 "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
                 (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
             )
+
+    @staticmethod
+    def request_fingerprint(objective: str) -> str:
+        """Return a stable digest without storing another copy of the objective."""
+        return hashlib.sha256(objective.strip().encode("utf-8")).hexdigest()
+
+    def lookup_idempotency(self, idempotency_key: str) -> dict[str, str] | None:
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            row = connection.execute(
+                "SELECT request_hash, task_id FROM verity_idempotency_keys WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"request_hash": row[0], "task_id": row[1]}
+
+    def create_idempotent(
+        self, task_id: str, objective: str, state: dict[str, Any], idempotency_key: str
+    ) -> tuple[str, str]:
+        """Atomically create a task and bind its idempotency key.
+
+        Returns (created|replay|conflict, task_id). BEGIN IMMEDIATE serializes
+        concurrent first submissions so a single key cannot launch two tasks.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        request_hash = self.request_fingerprint(objective)
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT request_hash, task_id FROM verity_idempotency_keys WHERE idempotency_key=?",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing is not None:
+                    connection.commit()
+                    if existing[0] != request_hash:
+                        return "conflict", existing[1]
+                    return "replay", existing[1]
+                connection.execute(
+                    "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
+                )
+                connection.execute(
+                    "INSERT INTO verity_idempotency_keys(idempotency_key, request_hash, task_id, created_at) "
+                    "VALUES(?, ?, ?, ?)",
+                    (idempotency_key, request_hash, task_id, now),
+                )
+                connection.commit()
+                return "created", task_id
+            except Exception:
+                connection.rollback()
+                raise
 
     def update(self, task_id: str, status: str, state: dict[str, Any]) -> None:
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
@@ -222,8 +282,35 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     def run_agent(
         request: TaskRunRequest,
         background_tasks: BackgroundTasks,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         _auth: None = Depends(require_api_key),
     ) -> dict[str, Any]:
+        if idempotency_key is not None:
+            idempotency_key = idempotency_key.strip()
+            if re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", idempotency_key) is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Idempotency-Key must be 8-128 characters using letters, numbers, dot, underscore, colon, or hyphen.",
+                )
+            prior = store.lookup_idempotency(idempotency_key)
+            if prior is not None:
+                if prior["request_hash"] != store.request_fingerprint(request.user_objective):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Idempotency-Key was already used for a different objective.",
+                    )
+                existing_task = store.get(prior["task_id"])
+                if existing_task is None:
+                    logger.error("Idempotency record refers to missing task %s.", prior["task_id"])
+                    raise HTTPException(status_code=500, detail="Idempotency record is inconsistent; contact the operator.")
+                return {
+                    "task_id": prior["task_id"],
+                    "status": existing_task["status"],
+                    "status_url": f"/api/v1/agent/status/{prior['task_id']}",
+                    "message": "Returning the original task; this Idempotency-Key has already been processed.",
+                    "idempotent_replay": True,
+                }
+
         if not task_slots.acquire(blocking=False):
             raise HTTPException(
                 status_code=429,
@@ -232,7 +319,33 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
             )
         state = initial_state(request.task_id, request.user_objective)
         try:
-            store.create(request.task_id, request.user_objective, state)
+            if idempotency_key is None:
+                store.create(request.task_id, request.user_objective, state)
+                creation_status, actual_task_id = "created", request.task_id
+            else:
+                creation_status, actual_task_id = store.create_idempotent(
+                    request.task_id, request.user_objective, state, idempotency_key
+                )
+            if creation_status == "conflict":
+                task_slots.release()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key was concurrently used for a different objective.",
+                )
+            if creation_status == "replay":
+                task_slots.release()
+                existing_task = store.get(actual_task_id)
+                if existing_task is None:
+                    raise HTTPException(status_code=500, detail="Idempotency record is inconsistent; contact the operator.")
+                return {
+                    "task_id": actual_task_id,
+                    "status": existing_task["status"],
+                    "status_url": f"/api/v1/agent/status/{actual_task_id}",
+                    "message": "Returning the original task; this Idempotency-Key has already been processed.",
+                    "idempotent_replay": True,
+                }
+        except HTTPException:
+            raise
         except sqlite3.IntegrityError as exc:
             task_slots.release()
             raise HTTPException(status_code=409, detail="task_id already exists; use a new task_id.") from exc
