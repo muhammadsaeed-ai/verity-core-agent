@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import replace
 
 from fastapi.testclient import TestClient
@@ -12,6 +13,18 @@ from src.graph.workflow import build_workflow
 
 
 API_KEY = "test-verification-key-0123456789"
+
+def _wait_for_terminal(client: TestClient, task_id: str, headers: dict[str, str], timeout: float = 15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/agent/status/{task_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        if payload["status"] in {"completed", "needs_review", "failed"}:
+            return payload
+        time.sleep(0.025)
+    raise AssertionError(f"Task {task_id} did not finish within {timeout} seconds")
+
 
 
 def _record(task_id: str, filename: str, data: bytes) -> dict[str, object]:
@@ -113,6 +126,8 @@ def test_integrity_endpoint_verifies_then_detects_tampering(tmp_path):
             },
         )
         assert response.status_code == 202
+        status = _wait_for_terminal(client, task_id, headers)
+        assert status["status"] == "completed"
 
         check = client.get(f"/api/v1/agent/status/{task_id}/artifacts/verify", headers=headers)
         assert check.status_code == 200
