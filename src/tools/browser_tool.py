@@ -82,7 +82,10 @@ def _normalize_url(href: str) -> str | None:
                 return None
             # Browsers accept shorthand numeric IPv4 forms such as 127.1.
             # If ipaddress did not parse it above, do not treat it as a DNS name.
-            if all(label.isdigit() for label in labels):
+            if all(
+                re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", label) is not None
+                for label in labels
+            ):
                 return None
         else:
             if not address.is_global:
@@ -169,7 +172,13 @@ class BrowserUseTool(BaseTool):
         }
 
     def _browser_use_search(self, query: str) -> list[dict[str, str]]:
-        """Run Browser Use in its own Python environment to isolate its MCP dependency tree."""
+        """Run optional Browser Use only after an operator confirms isolated network egress."""
+        if not self.settings.browser_use_network_isolated:
+            raise RuntimeError(
+                "Browser Use is blocked by default because a browser agent can navigate to internal "
+                "network destinations. Set VERITY_BROWSER_USE_NETWORK_ISOLATED=true only after "
+                "enforcing network egress restrictions outside the process."
+            )
         repo_root = Path(__file__).resolve().parents[2]
         configured = os.getenv("VERITY_BROWSER_USE_PYTHON", "").strip()
         candidates: list[Path] = [Path(configured)] if configured else []
