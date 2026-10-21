@@ -15,3 +15,10 @@ def test_api_port_must_be_valid(monkeypatch) -> None:
     monkeypatch.setenv("VERITY_API_PORT", "70000")
     with pytest.raises(ValueError, match="VERITY_API_PORT"):
         Settings.from_env()
+
+
+
+def test_short_api_key_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("VERITY_API_KEY", "short")
+    with pytest.raises(ValueError, match="at least 32 characters"):
+        Settings.from_env()
