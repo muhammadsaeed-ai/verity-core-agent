@@ -190,3 +190,32 @@ def test_failed_status_preserves_error_and_partial_checkpoint(tmp_path):
     assert "internal diagnostic data" not in result["error"]
     assert result["retry_count"] == 1
     assert result["artifacts"] == [{"path": "partial/evidence.json"}]
+
+
+def test_terminal_checkpoint_wins_when_task_row_write_is_stale(tmp_path, monkeypatch):
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "api-stale-status.sqlite3", output_dir=tmp_path / "outputs",
+        api_key="test-verification-key-0123456789",
+    )
+    app = create_app(settings=settings, workflow=build_workflow(settings))
+    store = app.state.verity_store
+    real_update = store.update
+
+    def fail_terminal_update(task_id, status, state):
+        if status == "completed":
+            raise OSError("simulated terminal status persistence problem")
+        return real_update(task_id, status, state)
+
+    monkeypatch.setattr(store, "update", fail_terminal_update)
+    client = TestClient(app)
+    headers = {"X-API-Key": settings.api_key}
+    response = client.post(
+        "/api/v1/agent/run",
+        json={"task_id": "stale-status-01", "objective": "Verify terminal checkpoint status is not hidden by stale task rows."},
+        headers=headers,
+    )
+    assert response.status_code == 202
+    status = client.get("/api/v1/agent/status/stale-status-01", headers=headers)
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
