@@ -173,15 +173,21 @@ class TaskStore:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         lease_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        query = (
+            "SELECT task_id, objective, state_json, attempts, status, lease_until FROM verity_tasks "
+            "WHERE status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)) "
+            "ORDER BY created_at, task_id LIMIT 1"
+        )
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            # The steady-state empty poll must be read-only. BEGIN IMMEDIATE on every
+            # 250ms poll starves LangGraph's SQLite checkpoint writes under load.
+            if connection.execute(query, (now,)).fetchone() is None:
+                return None
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = connection.execute(
-                    "SELECT task_id, objective, state_json, attempts, status, lease_until FROM verity_tasks "
-                    "WHERE status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)) "
-                    "ORDER BY created_at, task_id LIMIT 1",
-                    (now,),
-                ).fetchone()
+                # Re-read after obtaining the write lock: another worker may have claimed
+                # the candidate after the preliminary, lock-free read.
+                row = connection.execute(query, (now,)).fetchone()
                 if row is None:
                     connection.commit()
                     return None
