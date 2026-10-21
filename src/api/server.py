@@ -100,10 +100,10 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     def require_api_key(supplied_key: str | None = Depends(api_key_header)) -> None:
         """Fail closed: task APIs remain disabled until an operator configures a secret."""
         expected = chosen.api_key
-        if not expected:
+        if len(expected) < 32:
             raise HTTPException(
                 status_code=503,
-                detail="Protected API endpoints are disabled. Configure VERITY_API_KEY before use.",
+                detail="Protected API endpoints are disabled. Configure VERITY_API_KEY with at least 32 characters.",
             )
         supplied = supplied_key or ""
         if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
