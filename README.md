@@ -175,7 +175,7 @@ Recent Browser Use releases and the selected CrewAI release declare incompatible
 
 <pre><code>python -m venv .venv-browser-use</code></pre>
 
-Install <code>requirements-browser-use.txt</code> in that environment, then set <code>VERITY_BROWSER_ENGINE=browser-use</code>. The tool auto-detects <code>.venv-browser-use</code>, or you can specify <code>VERITY_BROWSER_USE_PYTHON</code>. Playwright and the HTTP fallback remain available from the main environment.
+Install <code>requirements-browser-use.txt</code> in that environment, then set <code>VERITY_BROWSER_ENGINE=browser-use</code>. The tool auto-detects <code>.venv-browser-use</code>, or you can specify <code>VERITY_BROWSER_USE_PYTHON</code>. Browser Use remains blocked unless <code>VERITY_BROWSER_USE_NETWORK_ISOLATED=true</code>; set that only after enforcing operating-system/container outbound network restrictions that prevent access to localhost, private subnets, link-local/cloud metadata, and other internal endpoints. A configuration flag alone is not a network security boundary. Playwright and the HTTP fallback remain available from the main environment.
 
 For Playwright, install the browser binary once:
 
