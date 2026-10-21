@@ -81,13 +81,13 @@ class TaskEventStore:
             if status:
                 rows = connection.execute(
                     "SELECT task_id, objective, status, created_at, updated_at FROM verity_tasks "
-                    "WHERE status=? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    "WHERE status=? ORDER BY updated_at DESC, task_id ASC LIMIT ? OFFSET ?",
                     (status, limit, offset),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     "SELECT task_id, objective, status, created_at, updated_at FROM verity_tasks "
-                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    "ORDER BY updated_at DESC, task_id ASC LIMIT ? OFFSET ?",
                     (limit, offset),
                 ).fetchall()
         return [
