@@ -251,6 +251,6 @@ tests/                             # Unit, retry, API and workflow tests</code><
 <div align="center">
 
 **Built for developers by VerityAgent.**  
-Open-source foundation maintained by Mohammed Saeed, founder and owner of VerityAgent.
+Open-source foundation maintained by Muhammad Saeed, founder and owner of VerityAgent.
 
 </div>
