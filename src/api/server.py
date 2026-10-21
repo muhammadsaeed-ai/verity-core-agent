@@ -233,7 +233,6 @@ class TaskStore:
             "state": json.loads(row[3]), "created_at": row[4], "updated_at": row[5],
             "attempts": int(row[6] or 0), "lease_owner": row[7], "lease_until": row[8],
         }
-        }
 
 
 def _post_webhook(url: str, payload: dict[str, Any]) -> None:
