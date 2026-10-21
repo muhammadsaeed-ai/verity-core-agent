@@ -291,7 +291,12 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
             raise HTTPException(status_code=404, detail="Task was not found.")
         record_state = (record or {}).get("state", {})
         selected = {**record_state, **values}
-        status = (record or {}).get("status") or selected.get("status", "unknown")
+        record_status = (record or {}).get("status")
+        checkpoint_status = values.get("status") if isinstance(values, dict) else None
+        if record_status in {"queued", "running"} and checkpoint_status in {"completed", "needs_review", "failed"}:
+            status = checkpoint_status
+        else:
+            status = record_status or selected.get("status", "unknown")
         return {
             "task_id": task_id, "status": status, "retry_count": selected.get("retry_count", 0),
             "qa_feedback": selected.get("qa_feedback", {}), "artifacts": selected.get("execution_artifacts", []),
