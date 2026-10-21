@@ -122,7 +122,7 @@ Configure <code>GOOGLE_API_KEY</code> in <code>.env</code> for Gemini, or use Ol
 
 <pre><code>python main.py --task "Research current Python agent orchestration options and produce a sourced comparison"</code></pre>
 
-A configured model is required. Live research also needs internet access. When search backends return no usable sources, Verity-1 reports that limitation rather than fabricating source URLs.
+A configured model is required. Model calls are bounded by <code>VERITY_MODEL_TIMEOUT_SECONDS</code> (default <code>180</code> seconds); Gemini uses one retry and Ollama's HTTP client has the same timeout. Live research also needs internet access. When search backends return no usable sources, Verity-1 reports that limitation rather than fabricating source URLs.
 
 ### Start the API
 
@@ -228,6 +228,7 @@ Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callbac
 | <code>VERITY_RESEARCH_ENABLED</code> | <code>true</code> | Enable web research |
 | <code>VERITY_BROWSER_ENGINE</code> | <code>playwright</code> | <code>playwright</code> or <code>browser-use</code> first |
 | <code>VERITY_BROWSER_USE_PYTHON</code> | auto-detect | Optional isolated Browser Use interpreter |
+| <code>VERITY_MODEL_TIMEOUT_SECONDS</code> | <code>180</code> | Per-call Gemini/Ollama timeout; valid range 5–600 seconds |
 | <code>VERITY_ENABLE_CREWAI</code> | <code>true</code> | Enable live specialist crew |
 | <code>VERITY_DATABASE_PATH</code> | <code>data/verity.sqlite3</code> | SQLite checkpoint/task database |
 | <code>VERITY_OUTPUT_DIR</code> | <code>outputs</code> | Artifact output root |
@@ -278,7 +279,7 @@ tests/                             # Unit, retry, API and workflow tests</code><
 - QA confidence is an automated signal, not proof of factual correctness.
 - A source URL shows that a result was retrieved; it does not prove every associated claim.
 - Browser navigation requires installed browser dependencies; the HTTP parser is the final fallback.
-- All task API routes (run, status, inventory, and audit events) require <code>X-API-Key</code>; they return <code>503</code> until <code>VERITY_API_KEY</code> is configured and <code>401</code> for missing or incorrect keys. Keep the key private and use TLS behind a trusted reverse proxy for remote deployment.
+- All task API routes (run, status, inventory, audit events, and artifact verification) require <code>X-API-Key</code>; they return <code>503</code> until <code>VERITY_API_KEY</code> is configured and <code>401</code> for missing or incorrect keys. Keep the key private and use TLS behind a trusted reverse proxy for remote deployment.
 - The restricted Python runner uses a separate process, timeout, and best-effort OS resource limits where supported. It is still defense-in-depth, not a secure multi-tenant OS sandbox; do not expose arbitrary submitted code as a service without stronger container/VM isolation.
 - URL normalization rejects non-HTTP schemes, credentialed URLs, local/private IPs, intranet hostnames, and unusual ports. These checks reduce unsafe results but do not replace network-egress controls or protection against DNS rebinding in a browser worker.
 - The n8n callback is outbound network traffic. Configure a destination you control.
