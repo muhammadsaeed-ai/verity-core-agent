@@ -4,7 +4,7 @@
 </p>
 
 <h1 align="center">Verity-1 — Core Agent</h1>
-<p align="center"><strong>A checkpointed, schema-validated agent workflow that plans, researches, generates artifacts, and challenges its own output.</strong></p>
+<p align="center"><strong>A checkpointed, schema-validated agent workflow that plans, researches, creates artifacts, and challenges its own output.</strong></p>
 
 <p align="center">
   <a href="https://github.com/muhammadsaeed-ai/verity-core-agent/actions/workflows/ci.yml"><img src="https://github.com/muhammadsaeed-ai/verity-core-agent/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/LLM-Gemini%20%7C%20Ollama-7c3aed" alt="Gemini and Ollama" />
 </p>
 
-Verity-1 is the VerityAgent hybrid autonomous-agent foundation: LangGraph controls state and retries, CrewAI coordinates specialist roles, Browser Use / Playwright gather web evidence, a restricted Python runner handles bounded data work, and FastAPI exposes run/status endpoints for n8n.
+Verity-1 is the VerityAgent hybrid autonomous-agent foundation. LangGraph controls workflow state and retries, CrewAI coordinates specialist roles, Browser Use and Playwright gather web evidence, a restricted Python runner handles bounded data work, and FastAPI exposes run/status endpoints for n8n.
 
 This is not an unrestricted self-modifying agent. The default workflow creates traceable deliverables from structured state; arbitrary model-generated Python is never automatically executed.
 
@@ -24,39 +24,24 @@ This is not an unrestricted self-modifying agent. The default workflow creates t
   <table>
     <tr><td align="center"><strong>01 · PLAN</strong><br/>Objective → acceptance criteria</td><td align="center">➜</td><td align="center"><strong>02 · RESEARCH</strong><br/>Browser Use / Playwright / HTTP fallback</td></tr>
     <tr><td align="center"><strong>05 · QA CRITIC</strong><br/>Confidence, issues, retry feedback</td><td align="center">⬅</td><td align="center"><strong>03 · VALIDATE</strong><br/>Pydantic v2 contracts</td></tr>
-    <tr><td align="center"><strong>REPORT + JSON</strong><br/>SQLite thread checkpoint</td><td align="center">⬅</td><td align="center"><strong>04 · SYNTHESIZE</strong><br/>Files + SHA-256 manifests</td></tr>
+    <tr><td align="center"><strong>REPORT + JSON</strong><br/>SQLite checkpoints</td><td align="center">⬅</td><td align="center"><strong>04 · SYNTHESIZE</strong><br/>Artifacts + SHA-256 records</td></tr>
   </table>
   <p><strong>QA ≥ 0.80 → finish · QA &lt; 0.80 and retries &lt; 2 → research/execution loop</strong></p>
 </div>
 
-<details>
-<summary><strong>Inspect the execution contract</strong></summary>
+## Core capabilities
 
-| Stage | Input | Output / control |
-|---|---|---|
-| Planner | Objective and task ID | AgentPlan with verifiable steps |
-| Research | Plan and QA retry feedback | ResearchItem records with observed URLs where available |
-| Code & files | Validated plan and evidence | Markdown, JSON, and SHA-256 artifact records |
-| QA critic | Objective, criteria, artifact hashes | QAFeedback with confidence, issues, and retry directive |
-| Router | QA confidence and retry count | End or retry research/execution; maximum two retries |
-
-</details>
-
-## Implemented capabilities
-
-- **Durable control flow:** LangGraph StateGraph with SQLite SqliteSaver; graph thread IDs map to task IDs for checkpoint-state retrieval.
-- **Typed agent hand-offs:** Pydantic v2 contracts reject unknown fields in plans, evidence records, QA feedback, and final reports.
-- **Three specialist roles:** Lead Architect & Planner, Deep Web Intelligence Operator, and QA Verifier & Critic are defined as sequential CrewAI tasks.
-- **Browser resilience:** Browser Use can be selected first, then Playwright, then a DuckDuckGo HTML parser. Missing Chromium does not silently become fake evidence.
-- **Bounded Python runner:** AST checks, subprocess timeout, constrained imports/builtins, capped range, JSON input/output, and atomic artifact writing. This is defence-in-depth, not an OS-grade sandbox for hostile code.
-- **HTTP orchestration:** POST /api/v1/agent/run, GET /api/v1/agent/status/{task_id}, and configured N8N_WEBHOOK_URL completion/failure callbacks.
-- **Repeatable verification:** mock mode covers workflow routing and artifacts without a model key or browser.
+- **Durable control flow:** LangGraph StateGraph with SQLite SqliteSaver and task-based thread IDs.
+- **Typed hand-offs:** Pydantic v2 validates plans, browser evidence, QA feedback, and final reports; unexpected fields are rejected.
+- **Specialist team:** Lead Architect & Planner, Deep Web Intelligence Operator, and QA Verifier & Critic are defined as sequential CrewAI tasks.
+- **Browser resilience:** Browser Use runs in a dedicated Python environment; Playwright is tried next, with DuckDuckGo HTML HTTP as a final fallback.
+- **Bounded Python runner:** AST policy, subprocess timeout, constrained imports/builtins, capped range, JSON I/O, and atomic output writes. This is defence-in-depth, not an OS-grade sandbox for hostile code.
+- **HTTP orchestration:** POST /api/v1/agent/run, GET /api/v1/agent/status/{task_id}, and operator-configured n8n completion/failure callbacks.
+- **Repeatable verification:** deterministic mode runs without model credentials or live browsing and checks routing, schemas, and artifacts.
 
 ## Quick start
 
-### 1. Install
-
-Python 3.12 is the CI-tested baseline.
+Use Python 3.12 for the CI baseline.
 
 <pre><code>git clone https://github.com/muhammadsaeed-ai/verity-core-agent.git
 cd verity-core-agent
@@ -67,40 +52,48 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 </code></pre>
 
-Copy .env.example to .env and place your Google AI Studio key in GOOGLE_API_KEY for Gemini. If you plan to use Browser Use mode, install a compatible browser:
+Copy .env.example to .env. Set GOOGLE_API_KEY to a Google AI Studio key for Gemini, or choose Ollama below.
 
-<pre><code>python -m playwright install chromium
+### Browser Use isolation
+
+Current Browser Use releases and this CrewAI release pin incompatible MCP major versions. To keep both in the project without creating a dependency-resolution conflict, Browser Use runs in a separate environment. This is optional; Playwright and the HTTP fallback work from the main environment.
+
+<pre><code>python -m venv .venv-browser-use
+# Windows PowerShell:
+# .venv-browser-use\Scripts\python.exe -m pip install -r requirements-browser-use.txt
+# macOS/Linux:
+.venv-browser-use/bin/python -m pip install -r requirements-browser-use.txt
 </code></pre>
 
-### 2. Run a deterministic end-to-end smoke test
+Set VERITY_BROWSER_ENGINE=browser-use in .env to try Browser Use before Playwright. The tool detects the dedicated environment automatically; alternatively set VERITY_BROWSER_USE_PYTHON to its Python executable path. Install a Playwright Chromium binary for the Playwright fallback:
+
+<pre><code>python -m playwright install chromium</code></pre>
+
+### Deterministic end-to-end check
 
 <pre><code>python main.py --test-e2e</code></pre>
 
-This path makes no model API calls and does not require Chromium. It writes plan.json, evidence.json, execution-notes.md, report.md, and report.json under outputs/{task-id}/.
+No model API call or browser is required. The command writes plan.json, evidence.json, execution-notes.md, report.md, and report.json under outputs/{task-id}/ and exits non-zero when required artifacts are missing or QA is not accepted.
 
-### 3. Run a real task
+### Run a live task
 
-<pre><code>python main.py --task "Research current Python agent orchestration options and produce a cited comparison"</code></pre>
+<pre><code>python main.py --task "Research current Python agent orchestration options and produce a sourced comparison"</code></pre>
 
-A configured LLM is required. External research requires an internet connection. If no real sources are returned, the report says so instead of inventing citations.
+A configured model is required. External research requires internet access. If no sources are returned, the report states that limitation rather than inventing citations.
 
-### 4. Start the API
+### Start the API
 
 <pre><code>python main.py --serve</code></pre>
 
-Open http://127.0.0.1:8000/docs to inspect the API contract.
+Open http://127.0.0.1:8000/docs for the API contract.
 
 <pre><code>curl -X POST http://127.0.0.1:8000/api/v1/agent/run \
   -H "Content-Type: application/json" \
   -d '{"user_objective":"Create a verifiable report for a test workflow objective."}'</code></pre>
 
-Use the returned task_id with:
+Use the returned task_id with GET /api/v1/agent/status/{task_id}. Duplicate task IDs return HTTP 409; unknown task IDs return 404.
 
-<pre><code>curl http://127.0.0.1:8000/api/v1/agent/status/&lt;task_id&gt;</code></pre>
-
-For n8n callbacks, configure N8N_WEBHOOK_URL in .env. The service sends a JSON completion/failure event to this operator-controlled endpoint; callers cannot supply arbitrary callback URLs.
-
-## Provider modes
+## Model providers
 
 ### Gemini (default)
 
@@ -108,50 +101,47 @@ For n8n callbacks, configure N8N_WEBHOOK_URL in .env. The service sends a JSON c
 GOOGLE_API_KEY=your_google_ai_studio_key
 VERITY_GEMINI_MODEL=gemini-2.5-flash</code></pre>
 
-Gemini API free-tier availability, quotas, and data handling depend on Google's current terms. Unlimited free inference is not guaranteed.
+Free-tier access, rate limits, and data handling depend on Google's current terms. Unlimited free inference is not guaranteed.
 
-### Ollama (local model)
+### Ollama (local inference)
 
-Install Ollama separately and pull the model:
+Install Ollama separately, then retrieve the chosen local model:
 
 <pre><code>ollama pull llama3.2</code></pre>
 
-Configure:
+Configure .env:
 
 <pre><code>VERITY_PROVIDER=ollama
 VERITY_OLLAMA_MODEL=llama3.2
-VERITY_OLLAMA_BASE_URL=http://localhost:11434</code></pre>
-
-For fully local model inference, disable web research and the n8n callback:
-
-<pre><code>VERITY_PROVIDER=ollama
+VERITY_OLLAMA_BASE_URL=http://localhost:11434
 VERITY_RESEARCH_ENABLED=false
 N8N_WEBHOOK_URL=</code></pre>
 
-This disables online browsing; planning, file synthesis, checkpoints, and QA can use the local model. Installing dependencies and downloading model weights require network access beforehand.
+Disabling research and the callback keeps workflow model inference local. Installing packages and retrieving model weights require network access beforehand.
 
 ## API contract
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| POST | /api/v1/agent/run | Queue a task and return its ID |
-| GET | /api/v1/agent/status/{task_id} | Retrieve current/final state and QA feedback |
+| POST | /api/v1/agent/run | Accept a task and return its ID |
+| GET | /api/v1/agent/status/{task_id} | Retrieve stored state and QA feedback |
 | GET | /health | Liveness check |
 
-The run body accepts user_objective or its objective alias, plus an optional task_id. IDs allow letters, digits, underscores, and hyphens. Duplicate IDs return HTTP 409; unknown tasks return 404.
+The request accepts user_objective or its objective alias, plus an optional task_id. Task IDs allow letters, digits, underscores, and hyphens.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
 | VERITY_PROVIDER | gemini | gemini or ollama |
-| VERITY_GEMINI_MODEL | gemini-2.5-flash | Gemini model |
+| VERITY_GEMINI_MODEL | gemini-2.5-flash | Gemini chat model |
 | VERITY_OLLAMA_MODEL | llama3.2 | Local Ollama model |
-| DRY_RUN_TEST_MODE | false | Disable external inference and use deterministic test evidence |
-| VERITY_RESEARCH_ENABLED | true | Browser/search research |
+| DRY_RUN_TEST_MODE | false | Deterministic evidence and QA without external LLM calls |
+| VERITY_RESEARCH_ENABLED | true | Enable web research |
 | VERITY_BROWSER_ENGINE | playwright | playwright or browser-use first |
-| VERITY_ENABLE_CREWAI | true | Live specialist team |
-| VERITY_DATABASE_PATH | data/verity.sqlite3 | SQLite checkpoints and task records |
+| VERITY_BROWSER_USE_PYTHON | auto-detect | Optional isolated Browser Use Python path |
+| VERITY_ENABLE_CREWAI | true | Enable live specialist crew |
+| VERITY_DATABASE_PATH | data/verity.sqlite3 | SQLite checkpoints and API task records |
 | VERITY_OUTPUT_DIR | outputs | Artifact root |
 | N8N_WEBHOOK_URL | empty | Trusted completion/failure callback |
 | VERITY_API_HOST | 0.0.0.0 | API bind host |
@@ -159,42 +149,18 @@ The run body accepts user_objective or its objective alias, plus an optional tas
 
 ## Verification
 
-Run the complete test suite:
+<pre><code>pytest -v
+python main.py --test-e2e</code></pre>
 
-<pre><code>pytest -v</code></pre>
+GitHub Actions runs the unit/integration suite and deterministic smoke test on pushes and pull requests. The suite covers schema rejection, restricted execution, path traversal, retry loops and exhaustion, artifact generation, and API task/status flows.
 
-Run the deterministic end-to-end smoke test:
+## Security and reliability boundaries
 
-<pre><code>DRY_RUN_TEST_MODE=true VERITY_RESEARCH_ENABLED=false VERITY_ENABLE_CREWAI=false python main.py --test-e2e</code></pre>
-
-Tests cover strict schema validation, safe-runner restrictions, path traversal, retry loops and retry exhaustion, artifact creation, and FastAPI task/status behavior. GitHub Actions executes pytest and the smoke test on pushes and pull requests.
-
-## Repository structure
-
-<pre><code>src/
-├── config.py                 # Gemini / Ollama factory and settings
-├── schemas.py                # Strict Pydantic v2 hand-off contracts
-├── tools/
-│   ├── browser_tool.py       # Browser Use + Playwright + HTTP fallback
-│   └── code_sandbox.py       # Restricted Python runner + artifact writer
-├── crew/
-│   └── specialist_crew.py    # Planner, researcher, QA specialist roles
-├── graph/
-│   ├── state.py              # Typed workflow state
-│   └── workflow.py           # Graph nodes, routing, SQLite checkpoints
-└── api/
-    └── server.py             # FastAPI + n8n gateway
-main.py                       # CLI and server runner
-tests/                        # Unit, retry, API, integration verification
-</code></pre>
-
-## Reliability and security boundaries
-
-- QA confidence is an automated signal, not proof of correctness; inspect source pages for high-impact decisions.
-- A source URL records that a result was retrieved; it is not proof that every related claim is true.
-- Browser navigation requires compatible browser dependencies. If Chromium is unavailable, an HTTP fallback is attempted.
-- The restricted Python runner is not designed for hostile multi-tenant execution. Add OS/container isolation and resource limits before exposing arbitrary execution to untrusted users.
-- An n8n webhook is outbound network traffic. Configure only an endpoint you control.
+- QA confidence is an automated signal, not a guarantee of correctness.
+- A stored URL confirms retrieval, not that every statement on a page is true.
+- Browser navigation requires installed browser dependencies; the HTTP parser is the final fallback.
+- The Python runner is not suitable for hostile multi-tenant execution without OS/container isolation and resource limits.
+- An n8n webhook is outbound network traffic. Configure only a destination you control.
 - Follow each model provider's current usage terms and data policies.
 
 ---

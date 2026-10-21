@@ -1,13 +1,14 @@
-"""Browser Use + Playwright search tool with a DuckDuckGo HTTP fallback."""
+"""Browser Use subprocess bridge plus Playwright and HTTP search fallback."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import re
-import threading
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Type
 from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -120,58 +121,51 @@ class BrowserUseTool(BaseTool):
         }
 
     def _browser_use_search(self, query: str) -> list[dict[str, str]]:
-        from browser_use import Agent, ChatGoogle, ChatOllama
-
-        if self.settings.provider == "gemini":
-            if not self.settings.google_api_key:
-                raise RuntimeError("GOOGLE_API_KEY is required for Browser Use Gemini mode.")
-            llm = ChatGoogle(model=self.settings.gemini_model, api_key=self.settings.google_api_key)
+        """Run Browser Use in its own Python environment to isolate its MCP dependency tree."""
+        repo_root = Path(__file__).resolve().parents[2]
+        configured = os.getenv("VERITY_BROWSER_USE_PYTHON", "").strip()
+        candidates: list[Path] = [Path(configured)] if configured else []
+        if os.name == "nt":
+            candidates.append(repo_root / ".venv-browser-use" / "Scripts" / "python.exe")
         else:
-            llm = ChatOllama(model=self.settings.ollama_model, host=self.settings.ollama_base_url)
-
-        async def run_agent() -> str:
-            agent = Agent(
-                task=(
-                    "Search the web for this query: " + query +
-                    ". Open actual search results and return ONLY a JSON array with title, url, and snippet. "
-                    "Use real URLs observed in the browser; do not guess URLs."
-                ),
-                llm=llm, max_steps=4,
+            candidates.append(repo_root / ".venv-browser-use" / "bin" / "python")
+        interpreter = next((path for path in candidates if path.is_file()), None)
+        if interpreter is None:
+            raise RuntimeError(
+                "Browser Use's isolated environment is missing. Install requirements-browser-use.txt "
+                "inside .venv-browser-use or configure VERITY_BROWSER_USE_PYTHON."
             )
-            history = await agent.run()
-            return str(history.final_result() or "")
-
+        worker = repo_root / "scripts" / "browser_use_worker.py"
+        payload = {
+            "query": query,
+            "provider": self.settings.provider,
+            "gemini_model": self.settings.gemini_model,
+            "google_api_key": self.settings.google_api_key,
+            "ollama_model": self.settings.ollama_model,
+            "ollama_base_url": self.settings.ollama_base_url,
+            "timeout_seconds": self.settings.browser_timeout_seconds,
+        }
         try:
-            output = asyncio.run(run_agent())
-        except RuntimeError as exc:
-            if "asyncio.run()" not in str(exc):
-                raise
-            results: list[str] = []
-            errors: list[BaseException] = []
-
-            def worker() -> None:
-                try:
-                    results.append(asyncio.run(run_agent()))
-                except BaseException as inner:
-                    errors.append(inner)
-
-            thread = threading.Thread(target=worker, daemon=True)
-            thread.start()
-            thread.join(timeout=self.settings.browser_timeout_seconds + 10)
-            if thread.is_alive():
-                raise TimeoutError("Browser Use exceeded its time budget.")
-            if errors:
-                raise RuntimeError(str(errors[0]))
-            output = results[0] if results else ""
-        match = re.search(r"\[[\s\S]*\]", output)
-        if not match:
-            return []
-        decoded = json.loads(match.group(0))
-        if not isinstance(decoded, list):
+            completed = subprocess.run(
+                [str(interpreter), str(worker)],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                timeout=self.settings.browser_timeout_seconds + 15,
+                check=False,
+                cwd=str(repo_root),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("Browser Use worker exceeded its time limit.") from exc
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr.strip() or "Browser Use worker failed.")[-1500:])
+        response = json.loads(completed.stdout)
+        values = response.get("results", []) if isinstance(response, dict) else response
+        if not isinstance(values, list):
             return []
         return [
             {"title": str(item.get("title", "")), "url": str(item.get("url", "")), "snippet": str(item.get("snippet", ""))}
-            for item in decoded if isinstance(item, dict)
+            for item in values if isinstance(item, dict)
         ]
 
     def _playwright_search(self, query: str) -> list[dict[str, str]]:

@@ -1,0 +1,5 @@
+# Install in a separate .venv-browser-use environment.
+# Browser Use 0.13.11 requires MCP 2.x, which conflicts with CrewAI 1.15.22's MCP 1.x pin.
+pydantic==2.13.5
+python-dotenv==1.2.2
+browser-use==0.13.11
