@@ -20,7 +20,7 @@ def _seed_tasks(path):
             [
                 ("task-a", "Objective A", "completed", "{}", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00"),
                 ("task-b", "Objective B", "failed", "{}", "2026-01-01T00:00:01+00:00", "2026-01-01T00:00:03+00:00"),
-                ("task-c", "Objective C", "completed", "{}", "2026-01-01T00:00:02+00:00", "2026-01-01T00:00:04+00:00"),
+                ("task-c", "Objective C", "completed", "{}", "2026-01-01T00:00:02+00:00", "2026-01-01T00:00:02+00:00"),
             ],
         )
 
@@ -72,6 +72,15 @@ def test_task_inventory_filters_status_and_paginates(tmp_path):
     assert completed[0]["task_id"] != next_page[0]["task_id"]
     assert len(all_tasks) == 2
     assert all_tasks[0]["updated_at"] >= all_tasks[1]["updated_at"]
+
+
+def test_task_inventory_pagination_is_stable_for_equal_timestamps(tmp_path):
+    database = tmp_path / "events-tied-timestamps.sqlite3"
+    _seed_tasks(database)
+    store = TaskEventStore(database)
+    page_one = store.list_tasks(status="completed", limit=1, offset=0)
+    page_two = store.list_tasks(status="completed", limit=1, offset=1)
+    assert [page_one[0]["task_id"], page_two[0]["task_id"]] == ["task-a", "task-c"]
 
 
 def test_task_inventory_rejects_bad_pagination(tmp_path):
