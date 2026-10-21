@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.api.server import create_app
 from src.config import Settings
-from src.graph.workflow import build_workflow
+from src.graph.workflow import build_workflow, initial_state
 
 
 def test_api_accepts_run_and_returns_persisted_status(tmp_path) -> None:
