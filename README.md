@@ -126,15 +126,22 @@ A configured model is required. Live research also needs internet access. When s
 
 ### Start the API
 
+Before starting it, generate a unique secret:
+
+<pre><code>python -c "import secrets; print(secrets.token_urlsafe(32))"</code></pre>
+
+Copy the generated value into <code>VERITY_API_KEY=...</code> in <code>.env</code>. The run/status endpoints deliberately fail closed until this value is configured; <code>/health</code> remains public.
+
 <pre><code>python main.py --serve</code></pre>
 
-Open <code>http://127.0.0.1:8000/docs</code>.
+Open <code>http://127.0.0.1:8000/docs</code>. Supply the <code>X-API-Key</code> header when calling protected endpoints.
 
 <pre><code>curl -X POST http://127.0.0.1:8000/api/v1/agent/run \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_VERITY_API_KEY" \
   -d '{"user_objective":"Create a verifiable report for a test workflow objective."}'</code></pre>
 
-Use the returned <code>task_id</code> to query <code>GET /api/v1/agent/status/{task_id}</code>.
+Use the same header to query <code>GET /api/v1/agent/status/{task_id}</code>. Keep the key private and never commit <code>.env</code>.
 
 ## Model providers
 
@@ -201,6 +208,7 @@ Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callbac
 | <code>VERITY_DATABASE_PATH</code> | <code>data/verity.sqlite3</code> | SQLite checkpoint/task database |
 | <code>VERITY_OUTPUT_DIR</code> | <code>outputs</code> | Artifact output root |
 | <code>N8N_WEBHOOK_URL</code> | empty | Trusted completion/failure callback |
+| <code>VERITY_API_KEY</code> | empty (protected API disabled) | Required secret for run/status endpoints; send as <code>X-API-Key</code> |
 | <code>VERITY_API_HOST</code> | <code>0.0.0.0</code> | API bind host |
 | <code>VERITY_API_PORT</code> | <code>8000</code> | API port |
 
@@ -242,7 +250,9 @@ tests/                             # Unit, retry, API and workflow tests</code><
 - QA confidence is an automated signal, not proof of factual correctness.
 - A source URL shows that a result was retrieved; it does not prove every associated claim.
 - Browser navigation requires installed browser dependencies; the HTTP parser is the final fallback.
-- The restricted Python runner is defense-in-depth, not a secure multi-tenant OS sandbox. Add operating-system/container isolation and resource limits before exposing execution to untrusted users.
+- Run/status API routes require <code>X-API-Key</code>; they return <code>503</code> until <code>VERITY_API_KEY</code> is configured and <code>401</code> for missing or incorrect keys. Keep the key private and use TLS behind a trusted reverse proxy for remote deployment.
+- The restricted Python runner uses a separate process, timeout, and best-effort OS resource limits where supported. It is still defense-in-depth, not a secure multi-tenant OS sandbox; do not expose arbitrary submitted code as a service without stronger container/VM isolation.
+- URL normalization rejects non-HTTP schemes, credentialed URLs, local/private IPs, intranet hostnames, and unusual ports. These checks reduce unsafe results but do not replace network-egress controls or protection against DNS rebinding in a browser worker.
 - The n8n callback is outbound network traffic. Configure a destination you control.
 - Follow each model provider's current usage terms and data policies.
 
