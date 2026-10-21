@@ -37,6 +37,7 @@ class Settings:
     ollama_base_url: str = "http://localhost:11434"
     dry_run_test_mode: bool = False
     browser_engine: str = "playwright"
+    browser_use_network_isolated: bool = False
     research_enabled: bool = True
     enable_crewai: bool = True
     browser_timeout_seconds: int = 15
@@ -70,6 +71,7 @@ class Settings:
             ollama_base_url=os.getenv("VERITY_OLLAMA_BASE_URL", "http://localhost:11434").strip(),
             dry_run_test_mode=_env_bool("DRY_RUN_TEST_MODE", False),
             browser_engine=engine,
+            browser_use_network_isolated=_env_bool("VERITY_BROWSER_USE_NETWORK_ISOLATED", False),
             research_enabled=_env_bool("VERITY_RESEARCH_ENABLED", True),
             enable_crewai=_env_bool("VERITY_ENABLE_CREWAI", True),
             browser_timeout_seconds=max(3, min(60, int(os.getenv("VERITY_BROWSER_TIMEOUT_SECONDS", "15")))),
