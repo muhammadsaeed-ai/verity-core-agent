@@ -72,6 +72,17 @@ class TaskEventStore:
             for row in rows
         ]
 
+    def count_tasks(self, *, status: str | None = None) -> int:
+        """Return the total number of tasks matching a status filter, independent of pagination."""
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            if status:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM verity_tasks WHERE status=?", (status,)
+                ).fetchone()
+            else:
+                row = connection.execute("SELECT COUNT(*) FROM verity_tasks").fetchone()
+        return int(row[0]) if row else 0
+
     def list_tasks(self, *, limit: int = 50, offset: int = 0, status: str | None = None) -> list[dict[str, Any]]:
         if not 1 <= limit <= 200:
             raise ValueError("limit must be between 1 and 200.")
