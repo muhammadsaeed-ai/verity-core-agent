@@ -28,3 +28,9 @@ def test_active_task_limit_rejects_too_high(monkeypatch):
     monkeypatch.setenv('VERITY_MAX_ACTIVE_TASKS', '33')
     with pytest.raises(ValueError):
         Settings.from_env()
+
+
+def test_model_timeout_is_bounded(monkeypatch):
+    monkeypatch.setenv('VERITY_MODEL_TIMEOUT_SECONDS', '4')
+    with pytest.raises(ValueError, match='VERITY_MODEL_TIMEOUT_SECONDS'):
+        Settings.from_env()
