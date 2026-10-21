@@ -318,6 +318,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                 headers={"Retry-After": "5"},
             )
         state = initial_state(request.task_id, request.user_objective)
+        slot_released = False
         try:
             if idempotency_key is None:
                 store.create(request.task_id, request.user_objective, state)
@@ -327,16 +328,16 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                     request.task_id, request.user_objective, state, idempotency_key
                 )
             if creation_status == "conflict":
-                task_slots.release()
                 raise HTTPException(
                     status_code=409,
                     detail="Idempotency-Key was concurrently used for a different objective.",
                 )
             if creation_status == "replay":
-                task_slots.release()
                 existing_task = store.get(actual_task_id)
                 if existing_task is None:
                     raise HTTPException(status_code=500, detail="Idempotency record is inconsistent; contact the operator.")
+                task_slots.release()
+                slot_released = True
                 return {
                     "task_id": actual_task_id,
                     "status": existing_task["status"],
@@ -345,12 +346,16 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                     "idempotent_replay": True,
                 }
         except HTTPException:
+            if not slot_released:
+                task_slots.release()
             raise
         except sqlite3.IntegrityError as exc:
-            task_slots.release()
+            if not slot_released:
+                task_slots.release()
             raise HTTPException(status_code=409, detail="task_id already exists; use a new task_id.") from exc
         except Exception:
-            task_slots.release()
+            if not slot_released:
+                task_slots.release()
             raise
         _append_event_safely(events, request.task_id, "task.queued", {"objective_length": len(request.user_objective)})
         try:
