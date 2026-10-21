@@ -18,7 +18,14 @@ if load_dotenv is not None:
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
-    return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean (true/false, yes/no, on/off, or 1/0).")
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,7 @@ class Settings:
     database_path: Path = Path("data/verity.sqlite3")
     output_dir: Path = Path("outputs")
     n8n_webhook_url: str = ""
+    api_key: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
@@ -51,6 +59,9 @@ class Settings:
         engine = os.getenv("VERITY_BROWSER_ENGINE", "playwright").strip().lower()
         if engine not in {"playwright", "browser-use"}:
             raise ValueError("VERITY_BROWSER_ENGINE must be 'playwright' or 'browser-use'.")
+        api_port = int(os.getenv("VERITY_API_PORT", "8000"))
+        if not 1 <= api_port <= 65535:
+            raise ValueError("VERITY_API_PORT must be between 1 and 65535.")
         return cls(
             provider=provider,
             gemini_model=os.getenv("VERITY_GEMINI_MODEL", "gemini-2.5-flash").strip(),
@@ -65,8 +76,9 @@ class Settings:
             database_path=Path(os.getenv("VERITY_DATABASE_PATH", "data/verity.sqlite3")),
             output_dir=Path(os.getenv("VERITY_OUTPUT_DIR", "outputs")),
             n8n_webhook_url=os.getenv("N8N_WEBHOOK_URL", "").strip(),
+            api_key=os.getenv("VERITY_API_KEY", "").strip(),
             api_host=os.getenv("VERITY_API_HOST", "0.0.0.0").strip(),
-            api_port=int(os.getenv("VERITY_API_PORT", "8000")),
+            api_port=api_port,
         )
 
 
