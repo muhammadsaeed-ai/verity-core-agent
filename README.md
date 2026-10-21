@@ -3,7 +3,7 @@
 <img src="docs/assets/verity-hero.svg" alt="Verity-1 — autonomy with checkpoints, not blind execution" width="100%">
 
 <p>
-<a href="https://github.com/muhammadsaeed-ai/verity-core-agent/actions"><img src="https://img.shields.io/badge/CI-10%2F10%20tests%20passed-35D6A5?style=for-the-badge&logo=githubactions&logoColor=07131b" alt="10 tests passed in verified CI run"></a>
+<a href="https://github.com/muhammadsaeed-ai/verity-core-agent/actions"><img src="https://img.shields.io/github/actions/workflow/status/muhammadsaeed-ai/verity-core-agent/ci.yml?branch=main&style=for-the-badge&logo=githubactions&label=CI" alt="GitHub Actions CI status"></a>
 <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12">
 <img src="https://img.shields.io/badge/Pydantic-v2-E92063?style=for-the-badge&logo=pydantic&logoColor=white" alt="Pydantic v2">
 <img src="https://img.shields.io/badge/Models-Gemini%20%7C%20Ollama-8B7CF6?style=for-the-badge" alt="Gemini and Ollama">
@@ -46,7 +46,7 @@ These figures describe the current implementation and verified deterministic CI 
 |---|---|
 | QA acceptance threshold | <code>confidence &gt;= 0.80</code> |
 | Retry budget | Maximum 2 retries; failed exhaustion ends as <code>needs_review</code> |
-| Test baseline | 10 automated tests passed in the latest verified CI run |
+| Automated verification | Dependency consistency, unit/integration tests, production Docker image build, and deterministic E2E smoke test |
 | End-to-end outputs | <code>plan.json</code>, <code>evidence.json</code>, <code>execution-notes.md</code>, <code>report.md</code>, <code>report.json</code> |
 | Persistence | SQLite-backed LangGraph checkpointing plus task records |
 | Hand-off validation | Pydantic v2 models with unexpected fields forbidden |
@@ -191,7 +191,7 @@ For Playwright, install the browser binary once:
 | <code>GET</code> | <code>/api/v1/agent/status/{task_id}/events</code> | Ordered audit timeline with incremental cursor |
 | <code>GET</code> | <code>/health</code> | Service liveness check |
 
-The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>.
+The request accepts <code>user_objective</code> or the alias <code>objective</code>, plus an optional <code>task_id</code>. IDs may contain letters, numbers, underscores, and hyphens. Duplicate IDs return <code>409</code>; unknown tasks return <code>404</code>. Admission is bounded by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code> per server process); excess requests receive <code>429</code> with a <code>Retry-After</code> header.
 
 Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callback URLs are operator configuration, not accepted from public run requests.
 
@@ -213,6 +213,7 @@ Configure <code>N8N_WEBHOOK_URL</code> only for an endpoint you control. Callbac
 | <code>VERITY_API_KEY</code> | empty (protected API disabled) | Required secret for run/status endpoints; send as <code>X-API-Key</code> |
 | <code>VERITY_API_HOST</code> | <code>0.0.0.0</code> | API bind host |
 | <code>VERITY_API_PORT</code> | <code>8000</code> | API port |
+| <code>VERITY_MAX_ACTIVE_TASKS</code> | <code>4</code> | Per-process cap for queued/running requests; excess requests receive <code>429</code> |
 
 ## Verification
 
@@ -221,7 +222,7 @@ Run the test suite and end-to-end smoke test:
 <pre><code>pytest -v
 python main.py --test-e2e</code></pre>
 
-GitHub Actions runs dependency installation, unit/integration tests, and the deterministic smoke test on pushes and pull requests. Inspect the [CI run history](https://github.com/muhammadsaeed-ai/verity-core-agent/actions) for the latest result.
+GitHub Actions checks dependency consistency, runs unit/integration tests, builds the production Docker image, and runs the deterministic smoke test on pushes and pull requests. Inspect the [CI run history](https://github.com/muhammadsaeed-ai/verity-core-agent/actions) for the latest result.
 
 ## Repository structure
 
@@ -242,7 +243,9 @@ src/
 ├── graph/
 │   ├── state.py                   # Typed state contract
 │   └── workflow.py                # Graph nodes, QA routing, SQLite checkpoints
-└── api/server.py                  # FastAPI + n8n gateway
+├── api/
+│   ├── server.py                  # FastAPI + n8n gateway
+│   └── observability.py           # Task inventory and audit timeline
 scripts/browser_use_worker.py      # Isolated Browser Use worker
 main.py                            # CLI and server runner
 tests/                             # Unit, retry, API and workflow tests</code></pre>
@@ -256,6 +259,7 @@ tests/                             # Unit, retry, API and workflow tests</code><
 - The restricted Python runner uses a separate process, timeout, and best-effort OS resource limits where supported. It is still defense-in-depth, not a secure multi-tenant OS sandbox; do not expose arbitrary submitted code as a service without stronger container/VM isolation.
 - URL normalization rejects non-HTTP schemes, credentialed URLs, local/private IPs, intranet hostnames, and unusual ports. These checks reduce unsafe results but do not replace network-egress controls or protection against DNS rebinding in a browser worker.
 - The n8n callback is outbound network traffic. Configure a destination you control.
+- API task admission is bounded per server process by <code>VERITY_MAX_ACTIVE_TASKS</code> (default <code>4</code>); saturation returns <code>429</code> with <code>Retry-After</code>. FastAPI background tasks are not a durable distributed queue: a process restart can interrupt in-flight work. Use a persistent job queue for workloads that must survive restarts or run across multiple replicas.
 - Follow each model provider's current usage terms and data policies.
 
 ---
