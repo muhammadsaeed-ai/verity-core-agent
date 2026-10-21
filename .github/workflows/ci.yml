@@ -15,20 +15,22 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt && python -m pip check
       - name: Run unit and integration tests
         env:
           DRY_RUN_TEST_MODE: "true"
           VERITY_RESEARCH_ENABLED: "false"
           VERITY_ENABLE_CREWAI: "false"
         run: pytest -v
+      - name: Build production Docker image
+        run: docker build --tag verity-core-agent:ci .
       - name: Run deterministic end-to-end smoke test
         env:
           DRY_RUN_TEST_MODE: "true"
