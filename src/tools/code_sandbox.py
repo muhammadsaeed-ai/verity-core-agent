@@ -86,7 +86,27 @@ def validate_python_source(code: str) -> ast.Module:
 
 _CHILD_RUNNER = r'''
 import ast, csv, io, json, math, statistics, sys
-payload = json.loads(sys.argv[1])
+
+# Best-effort OS resource limits for the isolated child process. This is still
+# defense-in-depth, not a replacement for container/VM isolation.
+try:
+    import resource
+except ImportError:
+    resource = None
+if resource is not None:
+    try:
+        memory_limit = 512 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+        resource.setrlimit(resource.RLIMIT_CPU, (8, 9))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (2 * 1024 * 1024, 2 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Could not apply sandbox resource limits.") from exc
+
+raw_payload = sys.stdin.read(1_100_001)
+if len(raw_payload) > 1_100_000:
+    raise ValueError("Sandbox request payload is too large.")
+payload = json.loads(raw_payload)
 code = payload["code"]
 data = payload.get("input_data")
 def limited_range(*args):
@@ -118,7 +138,10 @@ elif "output" in namespace:
     result = namespace["output"]
 else:
     raise ValueError("Assign the final value to result or output.")
-print(json.dumps({"result": result}, ensure_ascii=False, allow_nan=False))
+serialized = json.dumps({"result": result}, ensure_ascii=False, allow_nan=False)
+if len(serialized.encode("utf-8")) > 1_000_000:
+    raise ValueError("Sandbox result is limited to 1 MB of JSON.")
+print(serialized)
 '''
 
 
@@ -156,13 +179,16 @@ def execute_python(code: str, input_data: Any = None, *, task_id: str = "sandbox
                    timeout_seconds: int = 3) -> dict[str, Any]:
     validate_python_source(code)
     encoded_input = json.dumps(input_data, ensure_ascii=False, allow_nan=False)
-    if len(encoded_input) > 1_000_000:
-        raise ValueError("Sandbox input is limited to 1 MB of JSON.")
+    if len(encoded_input.encode("utf-8")) > 1_000_000:
+        raise ValueError("Sandbox input is limited to 1 MB of UTF-8 JSON.")
     payload = json.dumps({"code": code, "input_data": input_data}, ensure_ascii=False, allow_nan=False)
+    if len(payload.encode("utf-8")) > 1_100_000:
+        raise ValueError("Sandbox request payload is too large.")
     try:
         completed = subprocess.run(
-            [sys.executable, "-I", "-c", _CHILD_RUNNER, payload],
-            check=False, capture_output=True, text=True, timeout=max(1, min(10, timeout_seconds)),
+            [sys.executable, "-I", "-c", _CHILD_RUNNER],
+            input=payload, check=False, capture_output=True, text=True,
+            timeout=max(1, min(10, timeout_seconds)),
             cwd=tempfile.gettempdir(), env={"PATH": os.environ.get("PATH", "")},
         )
     except subprocess.TimeoutExpired as exc:
