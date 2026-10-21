@@ -204,6 +204,32 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                 headers={"WWW-Authenticate": "ApiKey"},
             )
 
+    def load_task_snapshot(task_id: str, record: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Use task rows for normal polling; read the graph only after a recorded persistence failure."""
+        selected = dict(record.get("state", {}))
+        status = str(record.get("status") or selected.get("status", "unknown"))
+        if status in {"queued", "running"}:
+            try:
+                audit = events.list_events(task_id, limit=500)
+                recovery = next((
+                    event for event in reversed(audit)
+                    if event.get("event_type") == "task.status_persistence_failed"
+                    and event.get("payload", {}).get("workflow_status") in {"completed", "needs_review", "failed"}
+                ), None)
+            except Exception:
+                logger.warning("Could not inspect recovery events for task %s.", task_id)
+                recovery = None
+            if recovery is not None:
+                try:
+                    snapshot = runtime.get_state({"configurable": {"thread_id": task_id}})
+                    values = getattr(snapshot, "values", {}) or {}
+                    if isinstance(values, dict):
+                        selected.update(values)
+                    status = recovery["payload"]["workflow_status"]
+                except Exception:
+                    logger.warning("Checkpoint recovery failed for task %s.", task_id)
+        return selected, status
+
     def run_task(task_id: str, objective: str) -> None:
         state = initial_state(task_id, objective)
         config = {"configurable": {"thread_id": task_id}}
