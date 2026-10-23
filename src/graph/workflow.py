@@ -402,6 +402,9 @@ def build_workflow(settings: Settings | None = None, *, qa_scores: list[float] |
     chosen = settings or Settings.from_env()
     chosen.database_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(chosen.database_path), check_same_thread=False, timeout=30)
+    # Enable concurrent readers while API stores write task status and audit events.
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=30000")
     nodes: dict[str, Callable[[VerityState], dict[str, Any]]] = {
         "planner": _planner_node(chosen), "research": _research_node(chosen),
         "execution": _code_node(chosen), "qa": _qa_node(chosen, qa_scores),
@@ -423,7 +426,11 @@ def build_workflow(settings: Settings | None = None, *, qa_scores: list[float] |
         builder.add_conditional_edges(
             "qa_critic", route_after_qa, {"research_execution": "research_execution", END: END}
         )
-        graph = builder.compile(checkpointer=SqliteSaver(connection))
+        # Initialize checkpoint tables during startup, not on the first live task.
+        # The first lazy schema write previously raced with TaskStore writes under load.
+        checkpointer = SqliteSaver(connection)
+        checkpointer.setup()
+        graph = builder.compile(checkpointer=checkpointer)
         return WorkflowRuntime(chosen, connection, graph=graph, nodes=nodes)
     logger.warning("LangGraph unavailable or fallback forced; using dependency-light state runner.")
     return WorkflowRuntime(chosen, connection, graph=None, nodes=nodes)
