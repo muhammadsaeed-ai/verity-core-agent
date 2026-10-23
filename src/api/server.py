@@ -9,14 +9,16 @@ import logging
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.security import APIKeyHeader
 
 from src.config import Settings
@@ -28,14 +30,32 @@ from src.schemas import TaskRunRequest
 logger = logging.getLogger(__name__)
 
 
+class TaskQueueFullError(RuntimeError):
+    """Raised when the durable queue reaches its configured admission limit."""
+
+
 class TaskStore:
     def __init__(self, database_path: Path):
         self.database_path = database_path
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(database_path), timeout=30) as connection:
+            # Serialize first-run creation and in-place schema migration across app processes.
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verity_tasks (task_id TEXT PRIMARY KEY, objective TEXT NOT NULL, "
-                "status TEXT NOT NULL, state_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                "status TEXT NOT NULL, state_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                "lease_owner TEXT, lease_until TEXT, attempts INTEGER NOT NULL DEFAULT 0)"
+            )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(verity_tasks)")}
+            if "lease_owner" not in columns:
+                connection.execute("ALTER TABLE verity_tasks ADD COLUMN lease_owner TEXT")
+            if "lease_until" not in columns:
+                connection.execute("ALTER TABLE verity_tasks ADD COLUMN lease_until TEXT")
+            if "attempts" not in columns:
+                connection.execute("ALTER TABLE verity_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_verity_tasks_claim "
+                "ON verity_tasks(status, lease_until, created_at)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verity_idempotency_keys ("
@@ -43,13 +63,39 @@ class TaskStore:
                 "created_at TEXT NOT NULL)"
             )
 
-    def create(self, task_id: str, objective: str, state: dict[str, Any]) -> None:
+    @staticmethod
+    def _pending_count(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM verity_tasks WHERE status IN ('queued', 'running')"
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+    def count_pending(self) -> int:
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            return self._pending_count(connection)
+
+    def create(
+        self,
+        task_id: str,
+        objective: str,
+        state: dict[str, Any],
+        max_pending: int = 100,
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
-            connection.execute(
-                "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
-                (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if self._pending_count(connection) >= max_pending:
+                    raise TaskQueueFullError("The durable task queue is full; retry after queued work drains.")
+                connection.execute(
+                    "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at, "
+                    "lease_owner, lease_until, attempts) VALUES(?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
+                    (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     @staticmethod
     def request_fingerprint(objective: str) -> str:
@@ -67,7 +113,8 @@ class TaskStore:
         return {"request_hash": row[0], "task_id": row[1]}
 
     def create_idempotent(
-        self, task_id: str, objective: str, state: dict[str, Any], idempotency_key: str
+        self, task_id: str, objective: str, state: dict[str, Any], idempotency_key: str,
+        max_pending: int = 100,
     ) -> tuple[str, str]:
         """Atomically create a task and bind its idempotency key.
 
@@ -88,9 +135,11 @@ class TaskStore:
                     if existing[0] != request_hash:
                         return "conflict", existing[1]
                     return "replay", existing[1]
+                if self._pending_count(connection) >= max_pending:
+                    raise TaskQueueFullError("The durable task queue is full; retry after queued work drains.")
                 connection.execute(
-                    "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO verity_tasks(task_id, objective, status, state_json, created_at, updated_at, "
+                    "lease_owner, lease_until, attempts) VALUES(?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
                     (task_id, objective, "queued", json.dumps(state, ensure_ascii=False), now, now),
                 )
                 connection.execute(
@@ -106,15 +155,87 @@ class TaskStore:
 
     def update(self, task_id: str, status: str, state: dict[str, Any]) -> None:
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
-            connection.execute(
-                "UPDATE verity_tasks SET status=?, state_json=?, updated_at=? WHERE task_id=?",
-                (status, json.dumps(state, ensure_ascii=False), datetime.now(timezone.utc).isoformat(), task_id),
+            now = datetime.now(timezone.utc).isoformat()
+            if status in {"completed", "needs_review", "failed"}:
+                connection.execute(
+                    "UPDATE verity_tasks SET status=?, state_json=?, updated_at=?, lease_owner=NULL, lease_until=NULL "
+                    "WHERE task_id=?",
+                    (status, json.dumps(state, ensure_ascii=False), now, task_id),
+                )
+            elif status == "queued":
+                connection.execute(
+                    "UPDATE verity_tasks SET status=?, state_json=?, updated_at=?, lease_owner=NULL, lease_until=NULL "
+                    "WHERE task_id=?",
+                    (status, json.dumps(state, ensure_ascii=False), now, task_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE verity_tasks SET status=?, state_json=?, updated_at=? WHERE task_id=?",
+                    (status, json.dumps(state, ensure_ascii=False), now, task_id),
+                )
+
+    def claim_next(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
+        """Atomically claim one queued or stale running task, recovering after process death."""
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        query = (
+            "SELECT task_id, objective, state_json, attempts, status, lease_until FROM verity_tasks "
+            "WHERE status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)) "
+            "ORDER BY created_at, task_id LIMIT 1"
+        )
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            # The steady-state empty poll must be read-only. BEGIN IMMEDIATE on every
+            # 250ms poll starves LangGraph's SQLite checkpoint writes under load.
+            if connection.execute(query, (now,)).fetchone() is None:
+                return None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                # Re-read after obtaining the write lock: another worker may have claimed
+                # the candidate after the preliminary, lock-free read.
+                row = connection.execute(query, (now,)).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                task_id = row[0]
+                updated = connection.execute(
+                    "UPDATE verity_tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, updated_at=? "
+                    "WHERE task_id=? AND (status='queued' OR (status='running' AND (lease_until IS NULL OR lease_until<=?)))",
+                    (worker_id, lease_until, now, task_id, now),
+                )
+                if updated.rowcount != 1:
+                    connection.rollback()
+                    return None
+                connection.commit()
+                return {
+                    "task_id": task_id,
+                    "objective": row[1],
+                    "state": json.loads(row[2]),
+                    "attempts": int(row[3] or 0) + 1,
+                    "previous_status": row[4],
+                    "previous_lease_until": row[5],
+                    "lease_owner": worker_id,
+                    "lease_until": lease_until,
+                }
+            except Exception:
+                connection.rollback()
+                raise
+
+    def heartbeat(self, task_id: str, worker_id: str, lease_seconds: int) -> bool:
+        now_dt = datetime.now(timezone.utc)
+        with sqlite3.connect(str(self.database_path), timeout=30) as connection:
+            cursor = connection.execute(
+                "UPDATE verity_tasks SET lease_until=?, updated_at=? "
+                "WHERE task_id=? AND status='running' AND lease_owner=?",
+                ((now_dt + timedelta(seconds=lease_seconds)).isoformat(), now_dt.isoformat(), task_id, worker_id),
             )
+            return cursor.rowcount == 1
 
     def get(self, task_id: str) -> dict[str, Any] | None:
         with sqlite3.connect(str(self.database_path), timeout=30) as connection:
             row = connection.execute(
-                "SELECT task_id, objective, status, state_json, created_at, updated_at FROM verity_tasks WHERE task_id=?",
+                "SELECT task_id, objective, status, state_json, created_at, updated_at, attempts, lease_owner, lease_until "
+                "FROM verity_tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
         if row is None:
@@ -122,6 +243,7 @@ class TaskStore:
         return {
             "task_id": row[0], "objective": row[1], "status": row[2],
             "state": json.loads(row[3]), "created_at": row[4], "updated_at": row[5],
+            "attempts": int(row[6] or 0), "lease_owner": row[7], "lease_until": row[8],
         }
 
 
@@ -173,7 +295,12 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     runtime = workflow or build_workflow(chosen)
     store = TaskStore(chosen.database_path)
     events = TaskEventStore(chosen.database_path)
-    task_slots = threading.BoundedSemaphore(chosen.max_active_tasks)
+    queue_capacity = max(chosen.max_active_tasks, chosen.max_active_tasks * 25)
+    lease_seconds = max(30, min(300, chosen.model_timeout_seconds))
+    worker_stop = threading.Event()
+    worker_lock = threading.Lock()
+    claim_lock = threading.Lock()
+    worker_threads: list[threading.Thread] = []
     app = FastAPI(
         title="Verity-1 Agent API", version="1.0.0",
         description="Hybrid autonomous workflow runner with Pydantic contracts and SQLite-backed state.",
@@ -182,7 +309,9 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     app.state.verity_workflow = runtime
     app.state.verity_store = store
     app.state.verity_events = events
-    app.state.verity_task_slots = task_slots
+    app.state.verity_queue_capacity = queue_capacity
+    app.state.verity_worker_threads = worker_threads
+    app.state.verity_worker_stop = worker_stop
 
     api_key_header = APIKeyHeader(
         name="X-API-Key", scheme_name="Verity API Key", auto_error=False
@@ -230,8 +359,14 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                     logger.warning("Checkpoint recovery failed for task %s.", task_id)
         return selected, status
 
-    def run_task(task_id: str, objective: str) -> None:
-        state = initial_state(task_id, objective)
+    def run_task(
+        task_id: str,
+        objective: str,
+        recovered_state: dict[str, Any] | None = None,
+    ) -> None:
+        state = dict(recovered_state) if isinstance(recovered_state, dict) else initial_state(task_id, objective)
+        state["task_id"] = task_id
+        state["user_objective"] = objective
         config = {"configurable": {"thread_id": task_id}}
         try:
             _append_event_safely(events, task_id, "task.started", {"objective_length": len(objective)})
@@ -295,11 +430,121 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
             }
         _post_webhook(chosen.n8n_webhook_url, callback_payload)
 
-    def run_task_with_slot(task_id: str, objective: str) -> None:
+    def heartbeat_lease(task_id: str, worker_id: str, heartbeat_stop: threading.Event) -> None:
+        """Keep an active claim leased across model/browser calls and transiently slow stages."""
+        interval = max(5.0, lease_seconds / 3.0)
+        while not heartbeat_stop.wait(interval):
+            try:
+                if not store.heartbeat(task_id, worker_id, lease_seconds):
+                    logger.warning("Worker %s no longer owns the lease for task %s.", worker_id, task_id)
+                    return
+            except Exception:
+                # Leave recovery to lease expiry if the database is temporarily unavailable.
+                logger.exception("Lease heartbeat failed for task %s.", task_id)
+
+    def queue_worker(worker_id: str) -> None:
+        """Consume persistent tasks and retry abandoned running records after their lease expires."""
+        current_thread = threading.current_thread()
+        idle_since: float | None = None
         try:
-            run_task(task_id, objective)
+            while not worker_stop.is_set():
+                try:
+                    # Serialize claims inside this process; SQLite leases still coordinate
+                    # distinct processes, while this avoids a startup burst of writer locks.
+                    with claim_lock:
+                        claimed = store.claim_next(worker_id, lease_seconds)
+                except Exception:
+                    logger.exception("Worker %s could not claim a durable task.", worker_id)
+                    worker_stop.wait(1.0)
+                    continue
+
+                if claimed is None:
+                    if idle_since is None:
+                        idle_since = time.monotonic()
+                    if time.monotonic() - idle_since >= 2.0:
+                        # Exit empty workers, but keep pending leased tasks under observation.
+                        # This also prevents idle daemon-thread accumulation in short-lived clients.
+                        with worker_lock:
+                            try:
+                                pending = store.count_pending()
+                            except Exception:
+                                logger.exception("Worker %s could not inspect queue depth.", worker_id)
+                                pending = 1
+                            if pending == 0:
+                                worker_threads[:] = [
+                                    thread for thread in worker_threads
+                                    if thread is not current_thread and thread.is_alive()
+                                ]
+                                return
+                        idle_since = time.monotonic()
+                    worker_stop.wait(0.25)
+                    continue
+
+                idle_since = None
+                task_id = claimed["task_id"]
+                if claimed["attempts"] > 1:
+                    _append_event_safely(
+                        events,
+                        task_id,
+                        "task.recovered",
+                        {"attempt": claimed["attempts"], "worker_id": worker_id},
+                    )
+                heartbeat_stop = threading.Event()
+                heartbeat_thread = threading.Thread(
+                    target=heartbeat_lease,
+                    args=(task_id, worker_id, heartbeat_stop),
+                    name=f"verity-heartbeat-{task_id[:24]}",
+                    daemon=True,
+                )
+                heartbeat_thread.start()
+                try:
+                    run_task(task_id, claimed["objective"], claimed.get("state"))
+                except Exception:
+                    # run_task normally translates failures to a terminal state. If its own
+                    # bookkeeping fails, let the lease expire so another worker can recover it.
+                    logger.exception("Worker %s aborted task %s; its lease will expire.", worker_id, task_id)
+                finally:
+                    heartbeat_stop.set()
+                    heartbeat_thread.join(timeout=1.0)
         finally:
-            task_slots.release()
+            with worker_lock:
+                worker_threads[:] = [
+                    thread for thread in worker_threads
+                    if thread is not current_thread and thread.is_alive()
+                ]
+
+    def start_workers() -> None:
+        """Ensure the configured local worker pool is running (safe for API/lifespan calls)."""
+        if worker_stop.is_set():
+            return
+        with worker_lock:
+            worker_threads[:] = [thread for thread in worker_threads if thread.is_alive()]
+            while len(worker_threads) < chosen.max_active_tasks:
+                index = len(worker_threads) + 1
+                worker_id = f"{uuid.uuid4().hex}:{index}"
+                thread = threading.Thread(
+                    target=queue_worker,
+                    args=(worker_id,),
+                    name=f"verity-task-worker-{index}",
+                    daemon=True,
+                )
+                worker_threads.append(thread)
+                thread.start()
+
+    def stop_workers() -> None:
+        worker_stop.set()
+        current = threading.current_thread()
+        with worker_lock:
+            threads = list(worker_threads)
+        for thread in threads:
+            if thread is not current:
+                thread.join(timeout=5.0)
+
+    # On a real server startup, workers scan for queued work and expired leases left by a crash.
+    # The API also calls start_workers after accepting work to support application runners which
+    # don't invoke ASGI lifespan hooks (for example, some embedded/test clients).
+    app.add_event_handler("startup", start_workers)
+    app.add_event_handler("shutdown", stop_workers)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -308,7 +553,6 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
     @app.post("/api/v1/agent/run", status_code=202)
     def run_agent(
         request: TaskRunRequest,
-        background_tasks: BackgroundTasks,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         _auth: None = Depends(require_api_key),
     ) -> dict[str, Any]:
@@ -339,21 +583,23 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                     "idempotent_replay": True,
                 }
 
-        if not task_slots.acquire(blocking=False):
-            raise HTTPException(
-                status_code=429,
-                detail=f"Task capacity is full ({chosen.max_active_tasks} active or queued per process). Retry after a task finishes.",
-                headers={"Retry-After": "5"},
-            )
         state = initial_state(request.task_id, request.user_objective)
-        slot_released = False
         try:
             if idempotency_key is None:
-                store.create(request.task_id, request.user_objective, state)
+                store.create(
+                    request.task_id,
+                    request.user_objective,
+                    state,
+                    max_pending=queue_capacity,
+                )
                 creation_status, actual_task_id = "created", request.task_id
             else:
                 creation_status, actual_task_id = store.create_idempotent(
-                    request.task_id, request.user_objective, state, idempotency_key
+                    request.task_id,
+                    request.user_objective,
+                    state,
+                    idempotency_key,
+                    max_pending=queue_capacity,
                 )
             if creation_status == "conflict":
                 raise HTTPException(
@@ -364,8 +610,6 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                 existing_task = store.get(actual_task_id)
                 if existing_task is None:
                     raise HTTPException(status_code=500, detail="Idempotency record is inconsistent; contact the operator.")
-                task_slots.release()
-                slot_released = True
                 _, existing_status = load_task_snapshot(actual_task_id, existing_task)
                 return {
                     "task_id": actual_task_id,
@@ -374,28 +618,23 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
                     "message": "Returning the original task; this Idempotency-Key has already been processed.",
                     "idempotent_replay": True,
                 }
+        except TaskQueueFullError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": "5"},
+            ) from exc
         except HTTPException:
-            if not slot_released:
-                task_slots.release()
             raise
         except sqlite3.IntegrityError as exc:
-            if not slot_released:
-                task_slots.release()
             raise HTTPException(status_code=409, detail="task_id already exists; use a new task_id.") from exc
-        except Exception:
-            if not slot_released:
-                task_slots.release()
-            raise
+
         _append_event_safely(events, request.task_id, "task.queued", {"objective_length": len(request.user_objective)})
-        try:
-            background_tasks.add_task(run_task_with_slot, request.task_id, request.user_objective)
-        except Exception:
-            task_slots.release()
-            raise
+        start_workers()
         return {
             "task_id": request.task_id, "status": "queued",
             "status_url": f"/api/v1/agent/status/{request.task_id}",
-            "message": "Task accepted. Poll the status URL for persisted workflow state.",
+            "message": "Task accepted into the durable queue. Poll the status URL for persisted workflow state.",
         }
 
     @app.get("/api/v1/agent/tasks")
@@ -450,6 +689,7 @@ def create_app(settings: Settings | None = None, workflow: WorkflowRuntime | Non
             "qa_feedback": selected.get("qa_feedback", {}), "artifacts": selected.get("execution_artifacts", []),
             "report": selected.get("final_report", {}), "error": selected.get("error"),
             "created_at": (record or {}).get("created_at"), "updated_at": (record or {}).get("updated_at"),
+            "attempts": (record or {}).get("attempts", 0),
         }
 
     return app

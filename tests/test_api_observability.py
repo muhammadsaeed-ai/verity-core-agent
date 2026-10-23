@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import time
 
 from fastapi.testclient import TestClient
 
 from src.api.server import create_app
 from src.config import Settings
 from src.graph.workflow import build_workflow
+
+
+def _wait_for_finished_event(client, task_id: str, headers: dict[str, str], timeout: float = 15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f"/api/v1/agent/status/{task_id}", headers=headers)
+        assert status.status_code == 200, status.text
+        if status.json()["status"] in {"completed", "needs_review", "failed"}:
+            events = client.get(
+                f"/api/v1/agent/status/{task_id}/events?limit=100", headers=headers
+            )
+            assert events.status_code == 200, events.text
+            types = [item["event_type"] for item in events.json()["items"]]
+            terminal_event = "task.finished" if status.json()["status"] != "failed" else "task.failed"
+            if terminal_event in types:
+                return status.json()
+        time.sleep(0.025)
+    raise AssertionError(f"Task {task_id} did not persist a terminal status/event in time")
 
 
 def test_task_inventory_and_audit_endpoints_are_authenticated_and_operational(tmp_path):
@@ -31,6 +50,7 @@ def test_task_inventory_and_audit_endpoints_are_authenticated_and_operational(tm
         headers=headers,
     )
     assert queued.status_code == 202
+    _wait_for_finished_event(client, "audit-api-task-01", headers)
 
     inventory = client.get("/api/v1/agent/tasks?limit=10&status=completed", headers=headers)
     assert inventory.status_code == 200
