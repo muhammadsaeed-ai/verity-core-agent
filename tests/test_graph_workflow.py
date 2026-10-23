@@ -4,7 +4,7 @@ from dataclasses import replace
 import json
 
 from src.config import Settings
-from src.graph.workflow import _fallback_plan, _qa_node, build_workflow, initial_state
+from src.graph.workflow import LANGGRAPH_AVAILABLE, _fallback_plan, _qa_node, build_workflow, initial_state
 from src.tools.code_sandbox import write_artifact
 
 
@@ -110,3 +110,25 @@ def test_qa_hard_gate_detects_tampered_artifact_even_when_model_passes(tmp_path,
     assert result["qa_feedback"]["passed"] is False
     assert result["qa_feedback"]["confidence"] == 0.79
     assert any("Artifact integrity check failed" in issue for issue in result["qa_feedback"]["issues"])
+
+
+def test_build_initializes_sqlite_wal_and_checkpoint_tables(tmp_path) -> None:
+    settings = replace(
+        Settings.from_env(), dry_run_test_mode=True, research_enabled=False, enable_crewai=False,
+        database_path=tmp_path / "startup-checkpoints.sqlite3", output_dir=tmp_path / "outputs",
+    )
+    runtime = build_workflow(settings)
+    try:
+        mode = runtime.connection.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "wal"
+        if LANGGRAPH_AVAILABLE:
+            tables = {
+                row[0]
+                for row in runtime.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "checkpoints" in tables
+            assert "writes" in tables
+    finally:
+        runtime.connection.close()
